@@ -2,60 +2,135 @@ name: MSBuild
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g. 2.0.6) — tag will be created as v2.0.6'
+        required: true
+        type: string
 
 env:
-  # Path to the solution file relative to the root of the project.
   SOLUTION_FILE_PATH: .\Sources\OpenKey\win32\OpenKey
-
-  # Configuration type to build.
-  # You can convert this to a build matrix if you need coverage of multiple configuration types.
-  # https://docs.github.com/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
-  BUILD_CONFIGURATION: Release
+  RC_FILE: Sources/OpenKey/win32/OpenKey/OpenKey/OpenKey.rc
 
 permissions:
-  contents: read
+  contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
     runs-on: windows-latest
 
+    outputs:
+      subject-name-32: OpenKey32.exe
+      subject-digest-32: ${{ steps.upload32.outputs.artifact-digest }}
+      subject-name-64: OpenKey64.exe
+      subject-digest-64: ${{ steps.upload64.outputs.artifact-digest }}
+
     steps:
     - uses: actions/checkout@v4
+
+    - name: Validate version format
+      shell: pwsh
+      run: |
+        $v = "${{ github.event.inputs.version }}"
+        if ($v -notmatch '^\d+\.\d+\.\d+$') {
+          Write-Error "Version must be in format X.Y.Z (e.g. 2.0.6)"
+          exit 1
+        }
+
+    - name: Patch version in .rc file
+      shell: pwsh
+      run: |
+        $v = "${{ github.event.inputs.version }}"
+        $parts = $v -split '\.'
+        $major = $parts[0]; $minor = $parts[1]; $patch = $parts[2]
+        $rcComma  = "$major,$minor,$patch,0"
+        $rcString = "$major.$minor.$patch.0"
+
+        $content = Get-Content "${{ env.RC_FILE }}" -Raw -Encoding UTF8
+
+        # Replace FILEVERSION and PRODUCTVERSION numeric fields
+        $content = $content -replace '(?m)^( FILEVERSION )\d+,\d+,\d+,\d+', "`${1}$rcComma"
+        $content = $content -replace '(?m)^( PRODUCTVERSION )\d+,\d+,\d+,\d+', "`${1}$rcComma"
+
+        # Replace FileVersion and ProductVersion string values
+        $content = $content -replace '(VALUE "FileVersion",\s*")[\d.]+(")', "`${1}$rcString`${2}"
+        $content = $content -replace '(VALUE "ProductVersion",\s*")[\d.]+(")', "`${1}$rcString`${2}"
+
+        # Write back (preserve UTF-8 with BOM as MSVC expects)
+        [System.IO.File]::WriteAllText("${{ env.RC_FILE }}", $content, [System.Text.UTF8Encoding]::new($true))
+
+        Write-Host "Patched .rc to version $rcString"
 
     - name: Add MSBuild to PATH
       uses: microsoft/setup-msbuild@v2
 
     - name: Build x86
-      run: msbuild -m -target:Rebuild -p:Configuration=Release -p:Platform=x86 ${{env.SOLUTION_FILE_PATH}}
+      run: msbuild -m -target:Rebuild -p:Configuration=Release -p:Platform=x86 ${{ env.SOLUTION_FILE_PATH }}
 
     - name: Build x64
-      run: msbuild -m -target:Rebuild -p:Configuration=Release -p:Platform=x64 ${{env.SOLUTION_FILE_PATH}}
+      run: msbuild -m -target:Rebuild -p:Configuration=Release -p:Platform=x64 ${{ env.SOLUTION_FILE_PATH }}
 
-    - name: Upload a Build Artifact
-      id: upload
+    - name: Rename artifacts
+      shell: pwsh
+      run: |
+        $base = "${{ env.SOLUTION_FILE_PATH }}"
+        Copy-Item "$base\Release\OpenKey32.exe"  "OpenKey32.exe"
+        Copy-Item "$base\x64\Release\OpenKey64.exe" "OpenKey64.exe"
+
+    - name: Upload OpenKey32.exe artifact
+      id: upload32
       uses: actions/upload-artifact@v4
       with:
-        name: OpenKey
-        path: |
-          ${{env.SOLUTION_FILE_PATH}}/Release/
-          ${{env.SOLUTION_FILE_PATH}}/x64/Release/
+        name: OpenKey32
+        path: OpenKey32.exe
 
-    outputs:
-      subject-name: OpenKey
-      subject-digest: ${{steps.upload.outputs.artifact-digest}}
+    - name: Upload OpenKey64.exe artifact
+      id: upload64
+      uses: actions/upload-artifact@v4
+      with:
+        name: OpenKey64
+        path: OpenKey64.exe
+
+    - name: Delete existing release and tag if present
+      shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="v${{ github.event.inputs.version }}"
+        # Delete release (ignore error if not found)
+        gh release delete "$TAG" --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+        # Delete tag remotely (ignore error if not found)
+        git push origin ":refs/tags/$TAG" 2>/dev/null || true
+
+    - name: Create GitHub Release and upload assets
+      shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG="v${{ github.event.inputs.version }}"
+        gh release create "$TAG" \
+          OpenKey32.exe \
+          OpenKey64.exe \
+          --repo "$GITHUB_REPOSITORY" \
+          --title "OpenKey $TAG" \
+          --notes "Release $TAG — built from commit $GITHUB_SHA" \
+          --latest
 
   attest:
     runs-on: ubuntu-latest
     needs: build
 
-    permissions:
-      id-token: write
-      contents: read
-      attestations: write
-
     steps:
-    - name: Generate artifact attestation
+    - name: Attest OpenKey32.exe
       uses: actions/attest-build-provenance@v2
       with:
-        subject-name: ${{needs.build.outputs.subject-name}}
-        subject-digest: sha256:${{needs.build.outputs.subject-digest}}
+        subject-name: ${{ needs.build.outputs.subject-name-32 }}
+        subject-digest: sha256:${{ needs.build.outputs.subject-digest-32 }}
+
+    - name: Attest OpenKey64.exe
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-name: ${{ needs.build.outputs.subject-name-64 }}
+        subject-digest: sha256:${{ needs.build.outputs.subject-digest-64 }}
