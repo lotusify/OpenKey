@@ -13,6 +13,7 @@ redistribute your new version, it MUST be open source.
 -----------------------------------------------------------*/
 #include "stdafx.h"
 #include "AppDelegate.h"
+#include "ExcludeApp.h"
 #include <mutex>
 
 #pragma comment(lib, "imm32")
@@ -249,6 +250,9 @@ void OpenKeyInit() {
 	DWORD smartSwitchKeySize;
 	BYTE* data = OpenKeyHelper::getRegBinary(_T("smartSwitchKey"), smartSwitchKeySize);
 	initSmartSwitchKey((Byte*)data, (int)smartSwitchKeySize);
+
+	//init and load excluded apps list
+	loadExcludedApps();
 
 	//init hook
 	HINSTANCE hInstance = GetModuleHandle(NULL);
@@ -596,6 +600,11 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	if (keyboardData->dwExtraInfo == OPENKEY_EXTRA_INFO) {
 		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 	}
+
+	//ignore events from excluded apps (hard exclude - no processing at all)
+	if (isExcludedApp(OpenKeyHelper::getLastAppExecuteName())) {
+		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
+	}
 	
 	//ignore if IME pad is open when typing Japanese/Chinese...
 	HWND hWnd = GetForegroundWindow();
@@ -790,6 +799,15 @@ VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, H
 		string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
 		if (exe.compare("explorer.exe") == 0) //dont apply with windows explorer
 			return;
+		// Force EN for excluded apps
+		if (isExcludedApp(exe)) {
+			if (vLanguage != 0) {
+				vLanguage = 0;
+				AppDelegate::getInstance()->onInputMethodChangedFromHotKey();
+			}
+			startNewSession();
+			return; // skip smart switch key logic
+		}
 		_languageTemp = getAppInputMethodStatus(exe, vLanguage | (vCodeTable << 1));
 		vTempOffEngine(false);
 		if (vUseSmartSwitchKey && (_languageTemp & 0x01) != vLanguage) {

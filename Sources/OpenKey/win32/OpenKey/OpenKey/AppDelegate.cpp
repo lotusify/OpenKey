@@ -12,6 +12,7 @@ You can fork, modify, improve this program. If you
 redistribute your new version, it MUST be open source.
 -----------------------------------------------------------*/
 #include "AppDelegate.h"
+#include "ExcludeAppDialog.h"
 
 static AppDelegate* _instance;
 
@@ -56,7 +57,8 @@ bool AppDelegate::isDialogMsg(MSG & msg) const {
 	return (mainDialog != NULL && IsDialogMessage(mainDialog->getHwnd(), &msg)) ||
 		(macroDialog != NULL && IsDialogMessage(macroDialog->getHwnd(), &msg)) || 
 		(convertDialog != NULL && IsDialogMessage(convertDialog->getHwnd(), &msg)) || 
-		(aboutDialog != NULL && IsDialogMessage(aboutDialog->getHwnd(), &msg));
+		(aboutDialog != NULL && IsDialogMessage(aboutDialog->getHwnd(), &msg)) ||
+		(excludeAppDialog != NULL && IsDialogMessage(excludeAppDialog->getHwnd(), &msg));
 }
 
 void AppDelegate::checkUpdate() {
@@ -158,6 +160,9 @@ void AppDelegate::closeDialog(BaseDialog * dialog) {
 	} else if (convertDialog == dialog) {
 		delete convertDialog;
 		convertDialog = NULL;
+	} else if (excludeAppDialog == dialog) {
+		delete excludeAppDialog;
+		excludeAppDialog = NULL;
 	}
 }
 
@@ -303,4 +308,13 @@ void AppDelegate::onOpenKeyExit() {
 	OpenKeyManager::freeEngine();
 	SystemTrayHelper::removeSystemTray();
 	PostQuitMessage(0);
+}
+
+void AppDelegate::onExcludeApp() {
+	if (excludeAppDialog == NULL) {
+		excludeAppDialog = new ExcludeAppDialog(hInstance, IDD_DIALOG_EXCLUDE_APP);
+		excludeAppDialog->show();
+	} else {
+		excludeAppDialog->bringOnTop();
+	}
 }

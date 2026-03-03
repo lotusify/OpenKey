@@ -236,6 +236,9 @@ INT_PTR MainControlDialog::eventProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM
         case IDC_BUTTON_MACRO_TABLE:
             AppDelegate::getInstance()->onMacroTable();
             break;
+        case IDC_BUTTON_EXCLUDE_APP:
+            AppDelegate::getInstance()->onExcludeApp();
+            break;
         case IDC_BUTTON_CHECK_UPDATE:
             onUpdateButton();
             break;

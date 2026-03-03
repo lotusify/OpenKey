@@ -167,6 +167,8 @@
     <ClInclude Include="AppDelegate.h" />
     <ClInclude Include="BaseDialog.h" />
     <ClInclude Include="ConvertToolDialog.h" />
+    <ClInclude Include="ExcludeApp.h" />
+    <ClInclude Include="ExcludeAppDialog.h" />
     <ClInclude Include="MacroDialog.h" />
     <ClInclude Include="MainControlDialog.h" />
     <ClInclude Include="OpenKeyHelper.h" />
@@ -186,6 +188,8 @@
     <ClCompile Include="AppDelegate.cpp" />
     <ClCompile Include="BaseDialog.cpp" />
     <ClCompile Include="ConvertToolDialog.cpp" />
+    <ClCompile Include="ExcludeApp.cpp" />
+    <ClCompile Include="ExcludeAppDialog.cpp" />
     <ClCompile Include="MacroDialog.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="MainControlDialog.cpp" />
