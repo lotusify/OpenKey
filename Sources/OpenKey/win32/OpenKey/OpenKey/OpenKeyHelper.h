@@ -29,6 +29,7 @@ public:
 	static BYTE* getRegBinary(LPCTSTR key, DWORD& outSize);
 
 	static void registerRunOnStartup(const int& val);
+	static void resetAllSettings();  // Delete entire registry key to reset to defaults
 
 	static LPTSTR getExecutePath();
 

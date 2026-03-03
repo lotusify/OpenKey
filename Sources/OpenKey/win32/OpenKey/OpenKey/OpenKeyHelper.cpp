@@ -16,6 +16,7 @@ redistribute your new version, it MUST be open source.
 #include <Urlmon.h>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 
 #pragma comment(lib, "version.lib")
 #pragma comment(lib, "Urlmon.lib")
@@ -28,7 +29,7 @@ static LPCTSTR _runOnStartupKeyPath = _T("Software\\Microsoft\\Windows\\CurrentV
 static TCHAR _executePath[MAX_PATH];
 static bool _hasGetPath = false;
 
-static DWORD _cacheProcessId = 0, _tempProcessId = 0;
+static DWORD _tempProcessId = 0;
 static HWND _tempWnd;
 static TCHAR _exePath[1024] = { 0 };
 static LPCTSTR _exeName = _exePath;
@@ -36,9 +37,24 @@ static HANDLE _proc;
 static string _exeNameUtf8 = "TheOpenKeyProject";
 static string _unknownProgram = "UnknownProgram";
 
+// Multi-app process name cache with TTL + HWND validation
+struct ProcessCacheEntry {
+    std::string name;
+    DWORD lastCheckTime;  // GetTickCount() when cached
+    HWND hwnd;            // Window handle to detect PID reuse
+};
+static std::unordered_map<DWORD, ProcessCacheEntry> _processNameCache;
+static const size_t MAX_PROCESS_CACHE_SIZE = 50;
+static const DWORD CACHE_TTL_MS = 5000;  // 5 second TTL
+
 int CF_RTF = RegisterClipboardFormat(_T("Rich Text Format"));
 int CF_HTML = RegisterClipboardFormat(_T("HTML Format"));
 int CF_OPENKEY = RegisterClipboardFormat(_T("OpenKey Format"));
+
+// Windows Clipboard History exclusion format
+// When this format is present, Windows will NOT save the clipboard content to history (Win+V)
+// See: https://docs.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats
+static UINT CF_EXCLUDE_CLIPBOARD_HISTORY = RegisterClipboardFormat(_T("ExcludeClipboardContentFromMonitorProcessing"));
 
 void OpenKeyHelper::openKey() {
 	LONG nError = RegOpenKeyEx(HKEY_CURRENT_USER, sk, NULL, KEY_ALL_ACCESS, &hKey);
@@ -92,6 +108,25 @@ BYTE * OpenKeyHelper::getRegBinary(LPCTSTR key, DWORD& outSize) {
 }
 
 void OpenKeyHelper::registerRunOnStartup(const int& val) {
+	// Helper lambda to delete scheduled task with proper elevation
+	auto deleteScheduledTask = []() {
+		// Try non-elevated first (might work if task was created by current user)
+		// If fail, use UAC elevation
+		SHELLEXECUTEINFOW sei = { sizeof(sei) };
+		sei.lpVerb = L"runas";  // Request elevation
+		sei.lpFile = L"schtasks";
+		sei.lpParameters = L"/delete /tn OpenKey /f";
+		sei.nShow = SW_HIDE;
+		sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+		
+		if (ShellExecuteExW(&sei)) {
+			if (sei.hProcess) {
+				WaitForSingleObject(sei.hProcess, 3000);
+				CloseHandle(sei.hProcess);
+			}
+		}
+	};
+
 	if (val) {
 		if (vRunAsAdmin) {
 			string path = wideStringToUtf8(getFullPath());
@@ -99,6 +134,11 @@ void OpenKeyHelper::registerRunOnStartup(const int& val) {
 			sprintf_s(buff, "schtasks /create /sc onlogon /tn OpenKey /rl highest /tr \"%s\" /f", path.c_str());
 			WinExec(buff, SW_HIDE);
 		} else {
+			// Non-admin: Use registry method
+			// First, delete any existing admin task (requires UAC)
+			deleteScheduledTask();
+			
+			// Then add registry entry
 			RegOpenKeyEx(HKEY_CURRENT_USER, _runOnStartupKeyPath, NULL, KEY_ALL_ACCESS, &hKey);
 			wstring path = getFullPath();
 			RegSetValueEx(hKey, _T("OpenKey"), 0, REG_SZ, (byte*)path.c_str(), ((DWORD)path.size() + 1) * sizeof(TCHAR));
@@ -108,8 +148,23 @@ void OpenKeyHelper::registerRunOnStartup(const int& val) {
 		RegOpenKeyEx(HKEY_CURRENT_USER, _runOnStartupKeyPath, NULL, KEY_ALL_ACCESS, &hKey);
 		RegDeleteValue(hKey, _T("OpenKey"));
 		RegCloseKey(hKey);
-		WinExec("schtasks /delete  /tn OpenKey /f", SW_HIDE);
+		// Delete scheduled task with elevation
+		deleteScheduledTask();
 	}
+}
+
+void OpenKeyHelper::resetAllSettings() {
+	// Remove startup entries first
+	RegOpenKeyEx(HKEY_CURRENT_USER, _runOnStartupKeyPath, NULL, KEY_ALL_ACCESS, &hKey);
+	RegDeleteValue(hKey, _T("OpenKey"));
+	RegCloseKey(hKey);
+	
+	// Try to delete scheduled task (may fail if not elevated, that's ok)
+	// Use non-elevated call - if task exists with admin rights, user should manually delete
+	_wsystem(L"schtasks /delete /tn OpenKey /f 2>nul");
+	
+	// Delete entire OpenKey registry key
+	RegDeleteKey(HKEY_CURRENT_USER, sk);
 }
 
 LPTSTR OpenKeyHelper::getExecutePath() {
@@ -124,11 +179,26 @@ LPTSTR OpenKeyHelper::getExecutePath() {
 string& OpenKeyHelper::getFrontMostAppExecuteName() {
 	_tempWnd = GetForegroundWindow();
 	GetWindowThreadProcessId(_tempWnd, &_tempProcessId);
-	if (_tempProcessId == _cacheProcessId) {
-		return _exeNameUtf8;
+	
+	// Check multi-app cache first (validate HWND + TTL)
+	auto cacheIt = _processNameCache.find(_tempProcessId);
+	if (cacheIt != _processNameCache.end()) {
+		// HWND must match (same window) AND TTL must not be expired
+		if (cacheIt->second.hwnd == _tempWnd && 
+			(GetTickCount() - cacheIt->second.lastCheckTime) < CACHE_TTL_MS) {
+			_exeNameUtf8 = cacheIt->second.name;
+			return _exeNameUtf8;
+		}
+		// Cache invalid (HWND changed or TTL expired) - will re-query below
 	}
-	_cacheProcessId = _tempProcessId;
-	_proc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, _tempProcessId);
+	
+	// Cache miss - query OS with safer flags
+	_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, _tempProcessId);
+	if (_proc == NULL) {
+		// Failed to open process (protected/system process)
+		return _unknownProgram;
+	}
+	
 	GetProcessImageFileName((HMODULE)_proc, _exePath, 1024);
 	CloseHandle(_proc);
 	
@@ -145,7 +215,13 @@ string& OpenKeyHelper::getFrontMostAppExecuteName() {
 	std::string strTo(size_needed, 0);
 	WideCharToMultiByte(CP_UTF8, 0, _exeName, (int)lstrlen(_exeName), &strTo[0], size_needed, NULL, NULL);
 	_exeNameUtf8 = strTo;
-	//LOG(L"%s\n", utf8ToWideString(_exeNameUtf8).c_str());
+	
+	// Add to cache (with size limit to prevent memory growth)
+	if (_processNameCache.size() >= MAX_PROCESS_CACHE_SIZE) {
+		_processNameCache.clear();  // Simple eviction - clear all when full
+	}
+	_processNameCache[_tempProcessId] = {_exeNameUtf8, GetTickCount(), _tempWnd};
+	
 	return _exeNameUtf8;
 }
 
@@ -200,6 +276,9 @@ void OpenKeyHelper::setClipboardText(LPCTSTR data, const int & len, const int& t
 	OpenClipboard(0);
 	EmptyClipboard();
 	SetClipboardData(type, hMem);
+	// Exclude from Windows Clipboard History (Win+V)
+	// This prevents OpenKey's typing from polluting user's clipboard history
+	SetClipboardData(CF_EXCLUDE_CLIPBOARD_HISTORY, NULL);
 	CloseClipboard();
 }
 
@@ -282,9 +361,12 @@ DWORD OpenKeyHelper::getVersionNumber() {
 		if (dwSize) {
 			VS_FIXEDFILEINFO* verInfo = (VS_FIXEDFILEINFO*)lpBuffer;
 			if (verInfo->dwSignature == 0xfeef04bd) {
-				return ((verInfo->dwFileVersionMS >> 16) & 0xffff) |
-					(((verInfo->dwFileVersionMS >> 0) & 0xffff) << 8) |
-					(((verInfo->dwFileVersionLS >> 16) & 0xffff) << 16);
+				// Format: major in bits 16-31, minor in bits 8-15, patch in bits 0-7
+				// FILEVERSION is stored as: MS = (major << 16) | minor, LS = (patch << 16) | build
+				WORD major = (verInfo->dwFileVersionMS >> 16) & 0xffff;
+				WORD minor = (verInfo->dwFileVersionMS >> 0) & 0xffff;
+				WORD patch = (verInfo->dwFileVersionLS >> 16) & 0xffff;
+				return (major << 16) | (minor << 8) | patch;
 			}
 		}
 	}
@@ -293,16 +375,40 @@ DWORD OpenKeyHelper::getVersionNumber() {
 }
 
 wstring OpenKeyHelper::getVersionString() {
-	TCHAR versionBuffer[MAX_PATH];
-	DWORD ver = getVersionNumber();
-	wsprintfW(versionBuffer, _T("%d.%d.%d"), ver & 0xFF, (ver>>8) & 0xFF, (ver >> 16) & 0xFF);
-	return wstring(versionBuffer);
-
-	// get the filename of the executable containing the version resource
+	// Get the filename of the executable containing the version resource
 	TCHAR szFilename[MAX_PATH + 1] = { 0 };
-	if (GetModuleFileName(NULL, szFilename, MAX_PATH) == 0) { 
+	if (GetModuleFileName(NULL, szFilename, MAX_PATH) == 0) {
 		return _T("");
 	}
+
+	// Allocate a block of memory for the version info
+	DWORD dummy;
+	UINT dwSize = GetFileVersionInfoSize(szFilename, &dummy);
+	if (dwSize == 0) {
+		return _T("");
+	}
+	std::vector<BYTE> data(dwSize);
+
+	// Load the version info
+	if (!GetFileVersionInfo(szFilename, NULL, dwSize, &data[0])) {
+		return _T("");
+	}
+
+	// Query ProductVersion string (supports "1.0.3 RC", "1.0.3 Beta", etc.)
+	LPWSTR lpBuffer = NULL;
+	UINT bufLen = 0;
+	if (VerQueryValue(&data[0], _T("\\StringFileInfo\\040904b0\\ProductVersion"), 
+	                  (VOID FAR* FAR*)&lpBuffer, &bufLen)) {
+		if (lpBuffer && bufLen > 0) {
+			return wstring(lpBuffer);
+		}
+	}
+
+	// Fallback to numeric version if string not found
+	DWORD ver = getVersionNumber();
+	TCHAR versionBuffer[MAX_PATH];
+	wsprintfW(versionBuffer, _T("%d.%d.%d"), ver & 0xFF, (ver>>8) & 0xFF, (ver >> 16) & 0xFF);
+	return wstring(versionBuffer);
 }
 
 wstring OpenKeyHelper::getContentOfUrl(LPCTSTR url){

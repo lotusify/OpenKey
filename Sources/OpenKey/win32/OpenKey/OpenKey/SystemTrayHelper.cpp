@@ -13,6 +13,12 @@ redistribute your new version, it MUST be open source.
 -----------------------------------------------------------*/
 #include "SystemTrayHelper.h"
 #include "AppDelegate.h"
+#include "OpenKeyManager.h"
+#include <Wtsapi32.h>
+
+#pragma comment(lib, "Wtsapi32.lib")
+
+#define TIMER_REINSTALL_HOOKS 1001
 
 #define WM_TRAYMESSAGE (WM_USER + 1)
 #define TRAY_ICONUID 100
@@ -51,6 +57,9 @@ static HMENU popupMenu;
 static HMENU otherCode;
 
 static NOTIFYICONDATA nid;
+static ULONGLONG lastUnlockTime = 0;
+
+#define SESSION_UNLOCK_DEBOUNCE_MS 2000
 
 map<UINT, LPCTSTR> menuData = {
 	{POPUP_VIET_ON_OFF, _T("Bật Tiếng Việt")},
@@ -79,9 +88,44 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 	switch (message) {
 	case WM_CREATE:
 		taskbarCreated = RegisterWindowMessage(_T("TaskbarCreated"));
+		
+		// Register session notification for lock/unlock detection
+		if (!WTSRegisterSessionNotification(hWnd, NOTIFY_FOR_THIS_SESSION)) {
+			OutputDebugString(_T("OpenKey: Failed to register session notification\n"));
+		} else {
+			OutputDebugString(_T("OpenKey: Session notification registered successfully\n"));
+		}
 		break;
 	case WM_USER+2019:
 		AppDelegate::getInstance()->onControlPanel();
+		break;
+		
+	// Handle session change (lock/unlock)
+	case WM_WTSSESSION_CHANGE:
+		if (wParam == WTS_SESSION_LOCK) {
+			OutputDebugString(_T("OpenKey: Session locked\n"));
+		} else if (wParam == WTS_SESSION_UNLOCK) {
+			// Debounce: Only process if at least 2 seconds apart
+			ULONGLONG now = GetTickCount64();
+			if (lastUnlockTime == 0 || now - lastUnlockTime > SESSION_UNLOCK_DEBOUNCE_MS) {
+				lastUnlockTime = now;
+				OutputDebugString(_T("OpenKey: Session unlocked. Scheduling hook reinstall...\n"));
+				
+				// Use timer to delay 500ms, then reinstall from main thread
+				SetTimer(hWnd, TIMER_REINSTALL_HOOKS, 500, NULL);
+			}
+		}
+		break;
+		
+	// Handle timer for hook reinstallation
+	case WM_TIMER:
+		if (wParam == TIMER_REINSTALL_HOOKS) {
+			KillTimer(hWnd, TIMER_REINSTALL_HOOKS);
+			
+			// CRITICAL: Called from main thread (has message loop)
+			OutputDebugString(_T("OpenKey: Reinstalling hooks from main thread...\n"));
+			OpenKeyManager::reinstallHooks();
+		}
 		break;
 	case WM_TRAYMESSAGE: {
 		if (lParam == WM_LBUTTONDBLCLK) {
@@ -163,6 +207,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 		}
 	}
 	break;
+	
+	case WM_DESTROY:
+		// Kill timer if still active
+		KillTimer(hWnd, TIMER_REINSTALL_HOOKS);
+		
+		// Unregister session notification on destroy
+		WTSUnRegisterSessionNotification(hWnd);
+		OutputDebugString(_T("OpenKey: Session notification unregistered\n"));
+		break;
+		
 	default:
 		// if the taskbar is restarted, add the system tray icon again
 		if (message == taskbarCreated) {

@@ -32,6 +32,7 @@ static vector<LPCTSTR> _tableCode = {
 
 extern void OpenKeyInit();
 extern void OpenKeyFree();
+extern void ReinstallHooks();
 
 unsigned short  OpenKeyManager::_lastKeyCode = 0;
 
@@ -49,6 +50,10 @@ void OpenKeyManager::initEngine() {
 
 void OpenKeyManager::freeEngine() {
 	OpenKeyFree();
+}
+
+void OpenKeyManager::reinstallHooks() {
+	ReinstallHooks();
 }
 
 bool OpenKeyManager::checkUpdate(string& newVersion) {
@@ -123,6 +128,9 @@ void OpenKeyManager::createDesktopShortcut() {
 			hres = pPersistFile->Save(savePath, TRUE);
 			pPersistFile->Release();
 			pShellLink->Release();
+			
+			// Notify Shell to refresh icon cache - fixes icon not showing on Windows 10
+			SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
 		}
 	}
 }

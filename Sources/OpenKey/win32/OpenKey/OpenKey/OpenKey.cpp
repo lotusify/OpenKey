@@ -13,6 +13,7 @@ redistribute your new version, it MUST be open source.
 -----------------------------------------------------------*/
 #include "stdafx.h"
 #include "AppDelegate.h"
+#include <mutex>
 
 #pragma comment(lib, "imm32")
 #define IMC_GETOPENSTATUS 0x0005
@@ -33,6 +34,28 @@ static vector<string> _chromiumBrowser = {
 	"chrome.exe", "brave.exe", "msedge.exe"
 };
 
+// MS Office apps that falsely report IME as ON - skip IME check for these
+// PowerPoint reports isImeON=1 even when no IME is active, blocking Vietnamese input
+static vector<string> _skipImeCheckApps = {
+	"powerpnt.exe",   // Microsoft PowerPoint
+	"winword.exe",    // Microsoft Word
+	"excel.exe"       // Microsoft Excel
+};
+
+// Helper for lowercase
+static string strToLower(const string& s) {
+	string result = s;
+	std::transform(result.begin(), result.end(), result.begin(),
+		[](unsigned char c) { return std::tolower(c); });
+	return result;
+}
+
+// Check if current app should skip IME check
+// NORMALIZED: compare lowercase to avoid case-sensitivity issues
+static bool shouldSkipImeCheck() {
+	string lowerAppName = strToLower(OpenKeyHelper::getLastAppExecuteName());
+	return std::find(_skipImeCheckApps.begin(), _skipImeCheckApps.end(), lowerAppName) != _skipImeCheckApps.end();
+}
 extern int vSendKeyStepByStep;
 extern int vUseGrayIcon;
 extern int vShowOnStartUp;
@@ -62,7 +85,12 @@ static string macroText, macroContent;
 static int _languageTemp = 0; //use for smart switch key
 static vector<Byte> savedSmartSwitchKeyData; ////use for smart switch key
 
+
 static bool _hasJustUsedHotKey = false;
+
+// Magic number to identify OpenKey-generated events (prevent hook re-entry)
+// Industry standard practice - UniKey, EVKey use similar approach
+#define OPENKEY_EXTRA_INFO 0x4F4B
 
 static INPUT backspaceEvent[2];
 static INPUT keyEvent[2];
@@ -75,6 +103,64 @@ void OpenKeyFree() {
 	UnhookWindowsHookEx(hMouseHook);
 	UnhookWindowsHookEx(hKeyboardHook);
 	UnhookWinEvent(hSystemEvent);
+}
+
+void ReinstallHooks() {
+	// Thread-safe: Use static mutex to avoid concurrent reinstalls
+	static std::mutex reinstallMutex;
+	std::lock_guard<std::mutex> lock(reinstallMutex);
+	
+	OutputDebugString(_T("OpenKey: ReinstallHooks - Starting...\n"));
+	
+	// Unhook old hooks (if still active)
+	if (hKeyboardHook) {
+		if (UnhookWindowsHookEx(hKeyboardHook)) {
+			OutputDebugString(_T("OpenKey: ReinstallHooks - Keyboard hook unhooked\n"));
+		}
+		hKeyboardHook = NULL;
+	}
+	
+	if (hMouseHook) {
+		if (UnhookWindowsHookEx(hMouseHook)) {
+			OutputDebugString(_T("OpenKey: ReinstallHooks - Mouse hook unhooked\n"));
+		}
+		hMouseHook = NULL;
+	}
+	
+	// Small delay to ensure hooks are fully released
+	Sleep(20);
+	
+	// Reset state variables
+	_lastFlag = 0;
+	_keycode = 0;
+	_hasJustUsedHotKey = false;
+	
+	// Resync _flag with current keyboard state
+	_flag = 0;
+	if (GetKeyState(VK_LSHIFT) < 0 || GetKeyState(VK_RSHIFT) < 0) _flag |= MASK_SHIFT;
+	if (GetKeyState(VK_LCONTROL) < 0 || GetKeyState(VK_RCONTROL) < 0) _flag |= MASK_CONTROL;
+	if (GetKeyState(VK_LMENU) < 0 || GetKeyState(VK_RMENU) < 0) _flag |= MASK_ALT;
+	if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0) _flag |= MASK_WIN;
+	if (GetKeyState(VK_NUMLOCK) < 0) _flag |= MASK_NUMLOCK;
+	if (GetKeyState(VK_CAPITAL) == 1) _flag |= MASK_CAPITAL;
+	if (GetKeyState(VK_SCROLL) < 0) _flag |= MASK_SCROLL;
+	
+	// Reinstall hooks
+	HINSTANCE hInstance = GetModuleHandle(NULL);
+	hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardHookProcess, hInstance, 0);
+	hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseHookProcess, hInstance, 0);
+	
+	if (hKeyboardHook && hMouseHook) {
+		OutputDebugString(_T("OpenKey: ReinstallHooks - Success!\n"));
+	} else {
+		OutputDebugString(_T("OpenKey: ReinstallHooks - FAILED!\n"));
+		if (!hKeyboardHook) {
+			OutputDebugString(_T("OpenKey: ReinstallHooks - Keyboard hook failed\n"));
+		}
+		if (!hMouseHook) {
+			OutputDebugString(_T("OpenKey: ReinstallHooks - Mouse hook failed\n"));
+		}
+	}
 }
 
 void OpenKeyInit() {
@@ -95,7 +181,9 @@ void OpenKeyInit() {
 	APP_GET_DATA(vUseGrayIcon, 0);
 	APP_GET_DATA(vShowOnStartUp, 1);
 	APP_GET_DATA(vRunWithWindows, 1);
-	OpenKeyHelper::registerRunOnStartup(vRunWithWindows);
+	// #FIXME_UAC: Commented out - causes UAC popup on every startup
+	// Call registerRunOnStartup only when user changes setting in UI (see SettingsDialog.cpp, OpenKeySettingsController.cpp)
+	// OpenKeyHelper::registerRunOnStartup(vRunWithWindows);
 	APP_GET_DATA(vUseSmartSwitchKey, 1);
 	APP_GET_DATA(vUpperCaseFirstChar, 0);
 	APP_GET_DATA(vAllowConsonantZFWJ, 0);
@@ -133,14 +221,14 @@ void OpenKeyInit() {
 	backspaceEvent[0].ki.wVk = VK_BACK;
 	backspaceEvent[0].ki.wScan = 0;
 	backspaceEvent[0].ki.time = 0;
-	backspaceEvent[0].ki.dwExtraInfo = 1;
+	backspaceEvent[0].ki.dwExtraInfo = OPENKEY_EXTRA_INFO;
 
 	backspaceEvent[1].type = INPUT_KEYBOARD;
 	backspaceEvent[1].ki.dwFlags = KEYEVENTF_KEYUP;
 	backspaceEvent[1].ki.wVk = VK_BACK;
 	backspaceEvent[1].ki.wScan = 0;
 	backspaceEvent[1].ki.time = 0;
-	backspaceEvent[1].ki.dwExtraInfo = 1;
+	backspaceEvent[1].ki.dwExtraInfo = OPENKEY_EXTRA_INFO;
 
 	//get key state
 	_flag = 0;
@@ -184,7 +272,7 @@ static inline void prepareKeyEvent(INPUT& input, const Uint16& keycode, const bo
 	input.ki.wVk = keycode;
 	input.ki.wScan = 0;
 	input.ki.time = 0;
-	input.ki.dwExtraInfo = 1;
+	input.ki.dwExtraInfo = OPENKEY_EXTRA_INFO;
 }
 
 static inline void prepareUnicodeEvent(INPUT& input, const Uint16& unicode, const bool& isPress) {
@@ -193,7 +281,7 @@ static inline void prepareUnicodeEvent(INPUT& input, const Uint16& unicode, cons
 	input.ki.wScan = unicode;
 	input.ki.time = 0;
 	input.ki.dwFlags = (isPress ? 0 : KEYEVENTF_KEYUP) | KEYEVENTF_UNICODE;
-	input.ki.dwExtraInfo = 1;
+	input.ki.dwExtraInfo = OPENKEY_EXTRA_INFO;
 }
 
 static void SendCombineKey(const Uint16& key1, const Uint16& key2, const DWORD& flagKey1=0, const DWORD& flagKey2 = 0) {
@@ -489,18 +577,40 @@ static bool UnsetModifierMask(const Uint16& vkCode) {
 	return true;
 }
 
+// IME session cache - avoid redundant SendMessageTimeout calls
+static bool _imeCheckedThisSession = false;
+static bool _cachedImeState = false;
+static uint64_t _lastImeCheckTime = 0;
+static const uint64_t IME_CHECK_TIMEOUT_MS = 500; // Minimum time between IME checks
+
+// Helper to reset IME session cache
+inline void resetImeSessionCache() {
+	_imeCheckedThisSession = false;
+	_cachedImeState = false;
+	_lastImeCheckTime = 0; // Reset timestamp to force fresh check
+}
+
 LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	keyboardData = (KBDLLHOOKSTRUCT *)lParam;
-	//ignore my event
-	if (keyboardData->dwExtraInfo != 0) {
+	//ignore my event (check for OpenKey magic number)
+	if (keyboardData->dwExtraInfo == OPENKEY_EXTRA_INFO) {
 		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 	}
 	
 	//ignore if IME pad is open when typing Japanese/Chinese...
 	HWND hWnd = GetForegroundWindow();
 	HWND hIME = ImmGetDefaultIMEWnd(hWnd);
-	LRESULT isImeON = SendMessage(hIME, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0);
-	if (isImeON) {
+	LRESULT isImeON = 0;
+	// Only call SendMessage if IME window exists, use timeout to avoid blocking
+	if (hIME != NULL) {
+		DWORD_PTR dwResult = 0;
+		if (SendMessageTimeout(hIME, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0, 
+		                       SMTO_ABORTIFHUNG | SMTO_BLOCK, 10, &dwResult)) {
+			isImeON = dwResult;
+		}
+	}
+	// Skip IME check for MS Office apps that falsely report IME as ON
+	if (isImeON && !shouldSkipImeCheck()) {
 		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 	}
 	
@@ -605,8 +715,8 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 		} else if (pData->code == vWillProcess || pData->code == vRestore || pData->code == vRestoreAndStartNewSession) { //handle result signal
 			//fix autocomplete
 			if (vFixRecommendBrowser && pData->extCode != 4) {
-				if (vFixChromiumBrowser && 
-					std::find(_chromiumBrowser.begin(), _chromiumBrowser.end(), OpenKeyHelper::getLastAppExecuteName()) != _chromiumBrowser.end()) {
+			if (vFixChromiumBrowser && 
+					std::find(_chromiumBrowser.begin(), _chromiumBrowser.end(), strToLower(OpenKeyHelper::getLastAppExecuteName())) != _chromiumBrowser.end()) {
 					SendCombineKey(KEY_LEFT_SHIFT, KEY_LEFT, 0, KEYEVENTF_EXTENDEDKEY);
 					if (pData->backspaceCount == 1)
 						pData->backspaceCount--;
@@ -651,6 +761,9 @@ LRESULT CALLBACK mouseHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	mouseData = (MSLLHOOKSTRUCT *)lParam;
 	switch (wParam) {
 	case WM_LBUTTONDOWN:
+		// Reset IME cache on left mouse click - user may have changed focus/input
+		resetImeSessionCache();
+		// fall through
 	
 	case WM_RBUTTONDOWN:
 	case WM_MBUTTONDOWN:
