@@ -49,18 +49,6 @@ redistribute your new version, it MUST be open source.
 
 using namespace std;
 
-// Global debug flag - set by PerformanceLogger::setEnabled()
-// Used by LOG macro to conditionally output debug messages
-extern bool _debugLogEnabled;
-
-extern wchar_t _logBuffer[1024];
-// LOG macro only outputs when Debug mode is enabled
-// This silences development logs in production while keeping them for debugging
-#define LOG(...)  if(_debugLogEnabled) { \
-                      wsprintfW(_logBuffer, __VA_ARGS__); \
-                      OutputDebugString(_logBuffer); \
-                  }
-
 #define APP_SET_DATA(KEY, VAL) KEY = VAL; OpenKeyHelper::setRegInt(_T(#KEY), KEY)
 #define APP_GET_DATA(KEY, DEFAULT_VAL) KEY = OpenKeyHelper::getRegInt(_T(#KEY), DEFAULT_VAL)
 

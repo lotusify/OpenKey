@@ -62,7 +62,7 @@ void OpenKeyHelper::openKey() {
 		nError = RegCreateKeyEx(HKEY_CURRENT_USER, sk, NULL, NULL, REG_OPTION_NON_VOLATILE, KEY_CREATE_SUB_KEY, NULL, &hKey, NULL);
 	}
 	if (nError) {
-		LOG(L"result %d\n", nError);
+		// registry open/create failed - nError contains the Win32 error code
 	}
 }
 
