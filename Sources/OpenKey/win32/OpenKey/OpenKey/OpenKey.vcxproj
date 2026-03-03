@@ -217,6 +217,8 @@
     <Image Include="StatusEng10.ico" />
     <Image Include="StatusViet.ico" />
     <Image Include="StatusViet10.ico" />
+    <Image Include="StatusViet10Dark.ico" />
+    <Image Include="StatusEng10Dark.ico" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="DeclareDPIAware.manifest">

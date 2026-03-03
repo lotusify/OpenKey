@@ -42,6 +42,10 @@ IDI_ICON_STATUS_VIET_10 ICON                    "StatusViet10.ico"
 
 IDI_ICON_STATUS_ENG_10  ICON                    "StatusEng10.ico"
 
+IDI_ICON_STATUS_VIET_10_DARK ICON               "StatusViet10Dark.ico"
+
+IDI_ICON_STATUS_ENG_10_DARK ICON                "StatusEng10Dark.ico"
+
 IDI_ICON_OK_BUTTON      ICON                    "OKButton.ico"
 
 IDI_ICON_EXIT_BUTTON    ICON                    "ExitButton.ico"
@@ -255,7 +259,8 @@ FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
     CONTROL         "Bật bảng này khi khởi động",IDC_CHECK_SHOW_ON_STARTUP,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,50,122,10
-    CONTROL         "Biểu tượng hiện đại",IDC_CHECK_MODERN_ICON,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,69,103,10
+    LTEXT           "Biểu tượng:",IDC_STATIC,7,71,52,8
+    COMBOBOX        IDC_COMBO_ICON_STYLE,62,68,90,50,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     CONTROL         "Khởi động cùng Windows",IDC_CHECK_RUN_WITH_WINDOWS,
                     "Button",BS_AUTOCHECKBOX | WS_TABSTOP,7,89,119,10
     CONTROL         "Chạy với quyền Admin",IDC_CHECK_RUN_AS_ADMIN,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,151,31,119,10
@@ -495,7 +500,7 @@ BEGIN
     IDS_STRING_ALLOW_ZWFJ   "Vẫn cho phép dùng các chữ z w f j làm phụ âm khi có bật tính năng kiểm tra chính tả"
     IDS_STRING_TEMP_OFF_SPELLING 
                             "Tạm tắt kiểm tra chính tả khi gõ một từ nào đó như từ Đắk Lắk, Krông,... Kiểm tra chính tả sẽ phục hồi trở lại cho từ tiếp theo"
-    IDS_STRING_MODERN_ICON  "Dùng biểu tượng đồng bộ với task bar của Windows 10"
+    IDS_STRING_MODERN_ICON  "Chọn kiểu biểu tượng hiển thị trên system tray"
     IDS_STRING_CAPS_FIRST_CHAR 
                             "Tự động viết hoa sau dấu chấm ngắt câu và sau khi xuống dòng"
     IDS_STRING_SMART_SWITCH_KEY 

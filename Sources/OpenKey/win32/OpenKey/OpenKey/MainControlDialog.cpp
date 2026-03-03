@@ -171,8 +171,11 @@ void MainControlDialog::initDialog() {
 
     /*------------end tab 2----------------*/
 
-    checkModernIcon = GetDlgItem(hTabPage3, IDC_CHECK_MODERN_ICON);
-    createToolTip(checkModernIcon, IDS_STRING_MODERN_ICON);
+    comboIconStyle = GetDlgItem(hTabPage3, IDC_COMBO_ICON_STYLE);
+    createToolTip(comboIconStyle, IDS_STRING_MODERN_ICON);
+    SendMessage(comboIconStyle, CB_ADDSTRING, 0, (LPARAM)_T("Mặc định"));
+    SendMessage(comboIconStyle, CB_ADDSTRING, 0, (LPARAM)_T("Hiện đại (sáng)"));
+    SendMessage(comboIconStyle, CB_ADDSTRING, 0, (LPARAM)_T("Hiện đại (tối)"));
 
     checkShowOnStartup = GetDlgItem(hTabPage3, IDC_CHECK_SHOW_ON_STARTUP);
     createToolTip(checkShowOnStartup, IDS_STRING_SHOW_ON_STARTUP);
@@ -346,7 +349,7 @@ void MainControlDialog::fillData() {
     SendMessage(checkRunWithWindows, BM_SETCHECK, vRunWithWindows ? 1 : 0, 0);
     SendMessage(checkSpelling, BM_SETCHECK, vCheckSpelling ? 1 : 0, 0);
     SendMessage(checkRestoreIfWrongSpelling, BM_SETCHECK, vRestoreIfWrongSpelling ? 1 : 0, 0);
-    SendMessage(checkModernIcon, BM_SETCHECK, vUseGrayIcon ? 1 : 0, 0);
+    SendMessage(comboIconStyle, CB_SETCURSEL, vUseGrayIcon, 0);
     SendMessage(checkAllowZWJF, BM_SETCHECK, vAllowConsonantZFWJ ? 1 : 0, 0);
     SendMessage(checkTempOffSpelling, BM_SETCHECK, vTempOffSpelling ? 1 : 0, 0);
     SendMessage(checkQuickStartConsonant, BM_SETCHECK, vQuickStartConsonant ? 1 : 0, 0);
@@ -398,6 +401,9 @@ void MainControlDialog::onComboBoxSelected(const HWND& hCombobox, const int& com
             setAppInputMethodStatus(OpenKeyHelper::getFrontMostAppExecuteName(), vLanguage | (vCodeTable << 1));
             saveSmartSwitchKeyData();
         }
+    }
+    else if (hCombobox == comboIconStyle) {
+        APP_SET_DATA(vUseGrayIcon, (int)SendMessage(hCombobox, CB_GETCURSEL, 0, 0));
     }
     SystemTrayHelper::updateData();
 }
@@ -503,10 +509,6 @@ void MainControlDialog::onCheckboxClicked(const HWND& hWnd) {
     else if (hWnd == checkUseMacroInEnglish) {
         val = (int)SendMessage(hWnd, BM_GETCHECK, 0, 0);
         APP_SET_DATA(vUseMacroInEnglishMode, val ? 1 : 0);
-    }
-    else if (hWnd == checkModernIcon) {
-        val = (int)SendMessage(hWnd, BM_GETCHECK, 0, 0);
-        APP_SET_DATA(vUseGrayIcon, val ? 1 : 0);
     }
     else if (hWnd == checkAllowZWJF) {
         val = (int)SendMessage(hWnd, BM_GETCHECK, 0, 0);

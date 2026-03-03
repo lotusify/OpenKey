@@ -296,11 +296,15 @@ void SystemTrayHelper::createPopupMenu() {
 static void loadTrayIcon() {
 	int icon = 0;
 	if (vLanguage) {
-		icon = vUseGrayIcon ? IDI_ICON_STATUS_VIET_10 : IDI_ICON_STATUS_VIET;
+		if (vUseGrayIcon == 1) icon = IDI_ICON_STATUS_VIET_10;
+		else if (vUseGrayIcon == 2) icon = IDI_ICON_STATUS_VIET_10_DARK;
+		else icon = IDI_ICON_STATUS_VIET;
 		LoadString(GetModuleHandle(0), IDS_TRAY_TITLE_2, nid.szTip, 128);
 	}
 	else {
-		icon = vUseGrayIcon ? IDI_ICON_STATUS_ENG_10 : IDI_ICON_STATUS_ENG;
+		if (vUseGrayIcon == 1) icon = IDI_ICON_STATUS_ENG_10;
+		else if (vUseGrayIcon == 2) icon = IDI_ICON_STATUS_ENG_10_DARK;
+		else icon = IDI_ICON_STATUS_ENG;
 		LoadString(GetModuleHandle(0), IDS_TRAY_TITLE, nid.szTip, 128);
 	}
 	nid.hIcon = LoadIcon(GetModuleHandle(0), MAKEINTRESOURCE(icon));

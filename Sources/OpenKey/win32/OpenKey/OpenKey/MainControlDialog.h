@@ -19,10 +19,11 @@ private:
 	HWND hTab, hTabPage1, hTabPage2, hTabPage3, hTabPage4;
 	HWND comboBoxInputType;
 	HWND comboBoxTableCode;
+	HWND comboIconStyle;
 	HWND checkCtrl, checkAlt, checkWin, checkShift, textSwitchKey, checkBeep;
 	HWND checkVietnamese, checkEnglish;
 	HWND checkModernOrthorgraphy, checkFixRecommendBrowser, checkShowOnStartup, checkRunWithWindows,
-		checkSpelling, checkRestoreIfWrongSpelling, checkUseClipboard, checkModernIcon,
+		checkSpelling, checkRestoreIfWrongSpelling, checkUseClipboard,
 		checkAllowZWJF, checkTempOffSpelling, checkQuickStartConsonant, checkQuickEndConsonant;
 	HWND checkSmartSwitchKey, checkCapsFirstChar, checkQuickTelex, checkUseMacro, checkUseMacroInEnglish;
 	HWND checkCreateDesktopShortcut, checkCheckNewVersion, checkRunAsAdmin, checkSupportMetroApp, checkMacroAutoCaps;
