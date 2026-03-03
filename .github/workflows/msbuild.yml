@@ -14,18 +14,10 @@ env:
 
 permissions:
   contents: write
-  id-token: write
-  attestations: write
 
 jobs:
   build:
     runs-on: windows-latest
-
-    outputs:
-      subject-name-32: OpenKey32.exe
-      subject-digest-32: ${{ steps.upload32.outputs.artifact-digest }}
-      subject-name-64: OpenKey64.exe
-      subject-digest-64: ${{ steps.upload64.outputs.artifact-digest }}
 
     steps:
     - uses: actions/checkout@v4
@@ -72,26 +64,21 @@ jobs:
     - name: Build x64
       run: msbuild -m -target:Rebuild -p:Configuration=Release -p:Platform=x64 ${{ env.SOLUTION_FILE_PATH }}
 
-    - name: Rename artifacts
+    - name: Package release zips
       shell: pwsh
       run: |
+        $v    = "${{ github.event.inputs.version }}"
         $base = "${{ env.SOLUTION_FILE_PATH }}"
-        Copy-Item "$base\Release\OpenKey32.exe"  "OpenKey32.exe"
-        Copy-Item "$base\x64\Release\OpenKey64.exe" "OpenKey64.exe"
 
-    - name: Upload OpenKey32.exe artifact
-      id: upload32
-      uses: actions/upload-artifact@v4
-      with:
-        name: OpenKey32
-        path: OpenKey32.exe
+        # x86 zip — entire Release\ folder contents
+        $zip32 = "OpenKey-v$v-x86.zip"
+        Compress-Archive -Path "$base\Release\*" -DestinationPath $zip32
+        Write-Host "Created $zip32"
 
-    - name: Upload OpenKey64.exe artifact
-      id: upload64
-      uses: actions/upload-artifact@v4
-      with:
-        name: OpenKey64
-        path: OpenKey64.exe
+        # x64 zip — entire x64\Release\ folder contents
+        $zip64 = "OpenKey-v$v-x64.zip"
+        Compress-Archive -Path "$base\x64\Release\*" -DestinationPath $zip64
+        Write-Host "Created $zip64"
 
     - name: Delete existing release and tag if present
       shell: bash
@@ -99,38 +86,20 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         TAG="v${{ github.event.inputs.version }}"
-        # Delete release (ignore error if not found)
         gh release delete "$TAG" --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
-        # Delete tag remotely (ignore error if not found)
         git push origin ":refs/tags/$TAG" 2>/dev/null || true
 
-    - name: Create GitHub Release and upload assets
+    - name: Create GitHub Release and upload zips
       shell: bash
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        TAG="v${{ github.event.inputs.version }}"
+        V="${{ github.event.inputs.version }}"
+        TAG="v$V"
         gh release create "$TAG" \
-          OpenKey32.exe \
-          OpenKey64.exe \
+          "OpenKey-${TAG}-x86.zip" \
+          "OpenKey-${TAG}-x64.zip" \
           --repo "$GITHUB_REPOSITORY" \
           --title "OpenKey $TAG" \
           --notes "Release $TAG — built from commit $GITHUB_SHA" \
           --latest
-
-  attest:
-    runs-on: ubuntu-latest
-    needs: build
-
-    steps:
-    - name: Attest OpenKey32.exe
-      uses: actions/attest-build-provenance@v2
-      with:
-        subject-name: ${{ needs.build.outputs.subject-name-32 }}
-        subject-digest: sha256:${{ needs.build.outputs.subject-digest-32 }}
-
-    - name: Attest OpenKey64.exe
-      uses: actions/attest-build-provenance@v2
-      with:
-        subject-name: ${{ needs.build.outputs.subject-name-64 }}
-        subject-digest: sha256:${{ needs.build.outputs.subject-digest-64 }}
