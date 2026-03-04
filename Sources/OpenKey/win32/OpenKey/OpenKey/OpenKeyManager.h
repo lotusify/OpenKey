@@ -22,7 +22,8 @@ public:
 
 	static void initEngine();
 	static void freeEngine();
-	static void reinstallHooks();  // Fix for lock/unlock hook issue
+	static void reinstallHooks();          // Fix for lock/unlock hook issue
+	static void checkAndReinstallHooks();  // Periodic health-check: detect silently-removed hooks
 
 	static bool checkUpdate(string& newVersion);
 	static std::wstring getUpdateDownloadUrl();  // Returns download URL for current architecture

@@ -18,7 +18,13 @@ redistribute your new version, it MUST be open source.
 
 #pragma comment(lib, "Wtsapi32.lib")
 
-#define TIMER_REINSTALL_HOOKS 1001
+#define TIMER_REINSTALL_HOOKS    1001
+#define TIMER_HOOK_HEALTH_CHECK  1002
+
+// Safety-net: reinstall hooks every 60s to recover from any edge case
+// where Windows silently removed the hook. The primary fix is the IME cache
+// in keyboardHookProcess which removes the slow SendMessageTimeout per keystroke.
+#define HOOK_HEALTH_CHECK_INTERVAL_MS 60000
 
 #define WM_TRAYMESSAGE (WM_USER + 1)
 #define TRAY_ICONUID 100
@@ -95,6 +101,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 		} else {
 			OutputDebugString(_T("OpenKey: Session notification registered successfully\n"));
 		}
+
+		// Start periodic hook health-check timer (every 30 seconds)
+		SetTimer(hWnd, TIMER_HOOK_HEALTH_CHECK, HOOK_HEALTH_CHECK_INTERVAL_MS, NULL);
 		break;
 	case WM_USER+2019:
 		AppDelegate::getInstance()->onControlPanel();
@@ -125,6 +134,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 			// CRITICAL: Called from main thread (has message loop)
 			OutputDebugString(_T("OpenKey: Reinstalling hooks from main thread...\n"));
 			OpenKeyManager::reinstallHooks();
+		} else if (wParam == TIMER_HOOK_HEALTH_CHECK) {
+			// Periodic health-check: detect and recover from silently-removed hooks
+			OutputDebugString(_T("OpenKey: Hook health-check tick\n"));
+			OpenKeyManager::checkAndReinstallHooks();
 		}
 		break;
 	case WM_TRAYMESSAGE: {
@@ -209,8 +222,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 	break;
 	
 	case WM_DESTROY:
-		// Kill timer if still active
+		// Kill timers if still active
 		KillTimer(hWnd, TIMER_REINSTALL_HOOKS);
+		KillTimer(hWnd, TIMER_HOOK_HEALTH_CHECK);
 		
 		// Unregister session notification on destroy
 		WTSUnRegisterSessionNotification(hWnd);

@@ -99,11 +99,46 @@ static INPUT keyEvent[2];
 LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK mouseHookProcess(int nCode, WPARAM wParam, LPARAM lParam);
 VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime);
+void ReinstallHooks();
 
 void OpenKeyFree() {
 	UnhookWindowsHookEx(hMouseHook);
 	UnhookWindowsHookEx(hKeyboardHook);
 	UnhookWinEvent(hSystemEvent);
+}
+
+void CheckAndReinstallHooks() {
+	// Called periodically from the main thread to detect silently-removed hooks.
+	// Windows can remove WH_KEYBOARD_LL / WH_MOUSE_LL without notice if the
+	// hook callback is too slow. We detect this by attempting UnhookWindowsHookEx:
+	//   - If it succeeds → hook was still registered, we just removed it → reinstall
+	//   - If it fails   → Windows already removed it silently → also reinstall
+	// Either way: always reinstall. The cost is ~20ms Sleep inside ReinstallHooks().
+	bool needReinstall = false;
+
+	if (hKeyboardHook) {
+		if (!UnhookWindowsHookEx(hKeyboardHook)) {
+			// Hook was already removed by Windows silently
+			OutputDebugString(_T("OpenKey: CheckAndReinstallHooks - keyboard hook was dead, reinstalling\n"));
+		} else {
+			OutputDebugString(_T("OpenKey: CheckAndReinstallHooks - keyboard hook alive, cycling\n"));
+		}
+		hKeyboardHook = NULL;
+		needReinstall = true;
+	} else {
+		// Hook handle is NULL — was never set or already cleared
+		OutputDebugString(_T("OpenKey: CheckAndReinstallHooks - keyboard hook handle was NULL, reinstalling\n"));
+		needReinstall = true;
+	}
+
+	if (hMouseHook) {
+		UnhookWindowsHookEx(hMouseHook);
+		hMouseHook = NULL;
+	}
+
+	if (needReinstall) {
+		ReinstallHooks();
+	}
 }
 
 void ReinstallHooks() {
@@ -581,17 +616,24 @@ static bool UnsetModifierMask(const Uint16& vkCode) {
 	return true;
 }
 
-// IME session cache - avoid redundant SendMessageTimeout calls
-static bool _imeCheckedThisSession = false;
+// IME check cache — avoids calling SendMessageTimeout on every keystroke.
+// Windows kills WH_KEYBOARD_LL hooks if the callback is too slow (~300ms budget).
+// SendMessageTimeout(10ms) on a busy IME window can eat into that budget on every
+// single keypress, causing intermittent hook removal without any warning.
+//
+// Cache strategy:
+//   - Re-check only when the foreground window changes, OR every 500ms.
+//   - resetImeSessionCache() is called when app focus changes (winEventProcCallback).
 static bool _cachedImeState = false;
 static uint64_t _lastImeCheckTime = 0;
-static const uint64_t IME_CHECK_TIMEOUT_MS = 500; // Minimum time between IME checks
+static HWND _lastCheckedImeHwnd = NULL;
+static const uint64_t IME_CHECK_INTERVAL_MS = 500; // Re-check interval
 
-// Helper to reset IME session cache
+// Helper to reset IME session cache (called on foreground window change)
 inline void resetImeSessionCache() {
-	_imeCheckedThisSession = false;
 	_cachedImeState = false;
-	_lastImeCheckTime = 0; // Reset timestamp to force fresh check
+	_lastImeCheckTime = 0;
+	_lastCheckedImeHwnd = NULL;
 }
 
 LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -607,19 +649,30 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	}
 	
 	//ignore if IME pad is open when typing Japanese/Chinese...
+	// Use cache: only call SendMessageTimeout when window changes or cache expires.
+	// This prevents the hook callback from being too slow and getting killed by Windows.
 	HWND hWnd = GetForegroundWindow();
 	HWND hIME = ImmGetDefaultIMEWnd(hWnd);
-	LRESULT isImeON = 0;
-	// Only call SendMessage if IME window exists, use timeout to avoid blocking
-	if (hIME != NULL) {
-		DWORD_PTR dwResult = 0;
-		if (SendMessageTimeout(hIME, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0, 
-		                       SMTO_ABORTIFHUNG | SMTO_BLOCK, 10, &dwResult)) {
-			isImeON = dwResult;
+	
+	uint64_t now = GetTickCount64();
+	bool needImeCheck = (hIME != _lastCheckedImeHwnd) || (now - _lastImeCheckTime > IME_CHECK_INTERVAL_MS);
+	
+	if (needImeCheck) {
+		bool imeOn = false;
+		if (hIME != NULL) {
+			DWORD_PTR dwResult = 0;
+			if (SendMessageTimeout(hIME, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0,
+			                       SMTO_ABORTIFHUNG | SMTO_BLOCK, 10, &dwResult)) {
+				imeOn = (dwResult != 0);
+			}
 		}
+		_cachedImeState = imeOn;
+		_lastImeCheckTime = now;
+		_lastCheckedImeHwnd = hIME;
 	}
+	
 	// Skip IME check for MS Office apps that falsely report IME as ON
-	if (isImeON && !shouldSkipImeCheck()) {
+	if (_cachedImeState && !shouldSkipImeCheck()) {
 		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 	}
 	
@@ -794,6 +847,9 @@ LRESULT CALLBACK mouseHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
+	// Foreground window changed — IME state of new window is unknown, invalidate cache.
+	resetImeSessionCache();
+
 	//smart switch key
 	if (vUseSmartSwitchKey || vRememberCode) {
 		string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
