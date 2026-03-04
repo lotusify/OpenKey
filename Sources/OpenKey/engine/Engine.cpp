@@ -836,6 +836,20 @@ void insertD(const Uint16& data, const bool& isCaps) {
 void insertAOE(const Uint16& data, const bool& isCaps) {
     findAndCalculateVowel();
     
+    // Bug 1 fix: if any vowel OTHER THAN the key being pressed already carries a
+    // circumflex (TONE_MASK) or horn/breve (TONEW_MASK), do not apply another
+    // circumflex. Bail out so the caller falls through to insertKey() and appends
+    // the raw letter instead.
+    // Example: "chưa" + "a" must NOT produce "chưâ" (ư has TONEW_MASK, KEY_A != KEY_W).
+    // We exclude the vowel that matches `data` itself because that case is the intended
+    // aa→â→aa revert cycle handled by the isRestore path below.
+    for (ii = VSI; ii <= VEI; ii++) {
+        if (CHR(ii) != data && (TypingWord[ii] & (TONE_MASK | TONEW_MASK))) {
+            isChanged = false;
+            return;
+        }
+    }
+    
     // Remove W tone from all vowels
     for (ii = VSI; ii <= VEI; ii++) {
         TypingWord[ii] &= ~TONEW_MASK;

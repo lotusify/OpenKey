@@ -11,3 +11,6 @@
 
 # Local docs/notes - not for public repo
 /Docs/
+
+# Reference repo (gonhanh Rust fork) - local analysis only, not part of this project
+/gonhanh.org/
