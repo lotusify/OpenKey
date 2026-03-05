@@ -623,17 +623,32 @@ static bool UnsetModifierMask(const Uint16& vkCode) {
 //
 // Cache strategy:
 //   - Re-check only when the foreground window changes, OR every 500ms.
-//   - resetImeSessionCache() is called when app focus changes (winEventProcCallback).
+//   - resetForegroundCache() is called when app focus changes (winEventProcCallback)
+//     and on mouse button events.
+//
+// Foreground HWND cache — avoids calling GetForegroundWindow() + ImmGetDefaultIMEWnd()
+// on every keystroke. These are also invalidated on foreground change.
 static bool _cachedImeState = false;
 static uint64_t _lastImeCheckTime = 0;
 static HWND _lastCheckedImeHwnd = NULL;
 static const uint64_t IME_CHECK_INTERVAL_MS = 500; // Re-check interval
 
-// Helper to reset IME session cache (called on foreground window change)
-inline void resetImeSessionCache() {
+static HWND _cachedForegroundHwnd = NULL; // Cached GetForegroundWindow() result
+static HWND _cachedDefaultImeHwnd = NULL; // Cached ImmGetDefaultIMEWnd() result
+
+// Reset all foreground-dependent caches (called on foreground window change)
+inline void resetForegroundCache() {
 	_cachedImeState = false;
 	_lastImeCheckTime = 0;
 	_lastCheckedImeHwnd = NULL;
+	_cachedForegroundHwnd = NULL;
+	_cachedDefaultImeHwnd = NULL;
+	OpenKeyHelper::invalidateAppNameCache();
+}
+
+// Kept for compatibility (mouse click path calls this)
+inline void resetImeSessionCache() {
+	resetForegroundCache();
 }
 
 LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
@@ -649,10 +664,15 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	}
 	
 	//ignore if IME pad is open when typing Japanese/Chinese...
-	// Use cache: only call SendMessageTimeout when window changes or cache expires.
-	// This prevents the hook callback from being too slow and getting killed by Windows.
-	HWND hWnd = GetForegroundWindow();
-	HWND hIME = ImmGetDefaultIMEWnd(hWnd);
+	// Use cache: only call GetForegroundWindow() + ImmGetDefaultIMEWnd() when
+	// foreground changes (resetForegroundCache invalidates _cachedForegroundHwnd).
+	// This prevents these syscalls from running on every single keystroke.
+	if (_cachedForegroundHwnd == NULL) {
+		_cachedForegroundHwnd = GetForegroundWindow();
+		_cachedDefaultImeHwnd = ImmGetDefaultIMEWnd(_cachedForegroundHwnd);
+	}
+	HWND hWnd = _cachedForegroundHwnd;
+	HWND hIME = _cachedDefaultImeHwnd;
 	
 	uint64_t now = GetTickCount64();
 	bool needImeCheck = (hIME != _lastCheckedImeHwnd) || (now - _lastImeCheckTime > IME_CHECK_INTERVAL_MS);
@@ -847,8 +867,9 @@ LRESULT CALLBACK mouseHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 }
 
 VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
-	// Foreground window changed — IME state of new window is unknown, invalidate cache.
-	resetImeSessionCache();
+	// Foreground window changed — invalidate all foreground-dependent caches
+	// (IME state, HWND, and app name).
+	resetForegroundCache();
 
 	//smart switch key
 	if (vUseSmartSwitchKey || vRememberCode) {

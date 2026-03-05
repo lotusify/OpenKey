@@ -35,6 +35,7 @@ public:
 
 	static string& getFrontMostAppExecuteName();
 	static string& getLastAppExecuteName();
+	static void invalidateAppNameCache(); // Call when foreground window changes
 
 	static wstring getFullPath();
 

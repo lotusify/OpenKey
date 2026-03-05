@@ -47,6 +47,11 @@ static std::unordered_map<DWORD, ProcessCacheEntry> _processNameCache;
 static const size_t MAX_PROCESS_CACHE_SIZE = 50;
 static const DWORD CACHE_TTL_MS = 5000;  // 5 second TTL
 
+// App name cache for getLastAppExecuteName() when vUseSmartSwitchKey==false.
+// Invalidated on foreground change (same event as IME cache).
+static bool _appNameCacheValid = false;
+static string _cachedAppName = "";
+
 int CF_RTF = RegisterClipboardFormat(_T("Rich Text Format"));
 int CF_HTML = RegisterClipboardFormat(_T("HTML Format"));
 int CF_OPENKEY = RegisterClipboardFormat(_T("OpenKey Format"));
@@ -225,9 +230,24 @@ string& OpenKeyHelper::getFrontMostAppExecuteName() {
 	return _exeNameUtf8;
 }
 
+void OpenKeyHelper::invalidateAppNameCache() {
+	_appNameCacheValid = false;
+}
+
 string & OpenKeyHelper::getLastAppExecuteName() {
-	if (!vUseSmartSwitchKey)
-		return getFrontMostAppExecuteName();
+	if (!vUseSmartSwitchKey) {
+		// When smart switch is OFF, cache the app name and only re-query
+		// when the foreground window changes (invalidateAppNameCache() called
+		// from resetForegroundCache() in OpenKey.cpp).
+		// Without this cache, getFrontMostAppExecuteName() (GetForegroundWindow +
+		// process lookup) would run on EVERY keystroke, eating into the
+		// ~300ms WH_KEYBOARD_LL budget and causing intermittent hook removal.
+		if (!_appNameCacheValid) {
+			_cachedAppName = getFrontMostAppExecuteName();
+			_appNameCacheValid = true;
+		}
+		return _cachedAppName;
+	}
 	return _exeNameUtf8;
 }
 
