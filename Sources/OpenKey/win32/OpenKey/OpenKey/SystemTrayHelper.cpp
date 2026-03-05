@@ -20,12 +20,16 @@ redistribute your new version, it MUST be open source.
 #pragma comment(lib, "Wtsapi32.lib")
 
 #define TIMER_REINSTALL_HOOKS    1001
-#define TIMER_HOOK_HEALTH_CHECK  1002
+#define TIMER_HOOK_HEALTH_CHECK  1002   // 1s  — NULL-only check (cheap, no hook removal)
+#define TIMER_HOOK_ZOMBIE_CHECK  1003   // 30s — zombie-check via UnhookWindowsHookEx
 
-// Safety-net: check hook health every 1s.
-// When Windows silently removes the hook, we detect it fast and reinstall immediately.
-// The check is cheap (just reads hKeyboardHook validity) — only reinstalls on actual death.
-#define HOOK_HEALTH_CHECK_INTERVAL_MS 1000
+// 1s: cheap NULL check — detects hook killed by Windows (handle goes NULL).
+// Does NOT call UnhookWindowsHookEx, so it never removes an alive hook.
+#define HOOK_HEALTH_CHECK_INTERVAL_MS  1000
+
+// 30s: zombie-check — detects non-NULL but dead handles using UnhookWindowsHookEx.
+// Runs infrequently so it won't interrupt typing sessions.
+#define HOOK_ZOMBIE_CHECK_INTERVAL_MS  30000
 
 #define WM_TRAYMESSAGE (WM_USER + 1)
 #define TRAY_ICONUID 100
@@ -105,6 +109,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
 		// Start periodic hook health-check timer (every 30 seconds)
 		SetTimer(hWnd, TIMER_HOOK_HEALTH_CHECK, HOOK_HEALTH_CHECK_INTERVAL_MS, NULL);
+		SetTimer(hWnd, TIMER_HOOK_ZOMBIE_CHECK,  HOOK_ZOMBIE_CHECK_INTERVAL_MS,  NULL);
 		break;
 	case WM_USER+2019:
 		AppDelegate::getInstance()->onControlPanel();
@@ -134,8 +139,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 			OKLog::write("HOOK", "session-unlock timer fired — reinstalling hooks from main thread");
 			OpenKeyManager::reinstallHooks();
 		} else if (wParam == TIMER_HOOK_HEALTH_CHECK) {
-			// Periodic health-check: detect and recover from silently-removed hooks
-			// (verbose logging happens inside CheckAndReinstallHooks)
+			// 1s: cheap NULL-only check — never removes an alive hook
+			OpenKeyManager::quickHookCheck();
+		} else if (wParam == TIMER_HOOK_ZOMBIE_CHECK) {
+			// 30s: full zombie-check via UnhookWindowsHookEx
 			OpenKeyManager::checkAndReinstallHooks();
 		}
 		break;

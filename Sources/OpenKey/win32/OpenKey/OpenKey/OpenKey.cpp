@@ -115,33 +115,39 @@ void OpenKeyFree() {
 	OKLog::close();
 }
 
-void CheckAndReinstallHooks() {
-	// Called every 1s from the main thread to detect silently-removed hooks.
-	// Windows removes WH_KEYBOARD_LL without notice when the callback is too slow.
-	//
-	// Detection strategy: attempt UnhookWindowsHookEx().
-	//   - Returns TRUE  → hook was still alive; we just removed it unnecessarily.
-	//                     Put it back (reinstall) but this should be rare post-caching.
-	//   - Returns FALSE → Windows already removed it silently. Reinstall immediately.
-	//
-	// With 1s polling: worst-case "dead time" after hook removal is now ~1s instead of 60s.
-	// The UnhookWindowsHookEx call itself is cheap (<1ms) and safe to call from main thread.
+// Called every 1s from the main thread.
+// ONLY checks if the handle is NULL — does NOT call UnhookWindowsHookEx.
+// This prevents the "reinstall every second" bug where probing with
+// UnhookWindowsHookEx was removing an alive hook, forcing a reinstall each tick.
+void QuickHookCheck() {
+	if (hKeyboardHook == NULL) {
+		OKLog::write("HOOK", "quick-check: keyboard hook handle NULL — reinstalling");
+		ReinstallHooks();
+		resetForegroundCache();
+	}
+	// Handle non-NULL → hook is presumed alive; zombie detection handled by 30s timer.
+}
 
+// Called every 30s from the main thread.
+// Uses UnhookWindowsHookEx to detect "zombie" hooks: handle is non-NULL but
+// Windows has already silently removed the hook underneath us.
+//   UnhookWindowsHookEx returns TRUE  → hook was alive; we just removed it → reinstall.
+//   UnhookWindowsHookEx returns FALSE → Windows already removed it → reinstall.
+// Either way we reinstall, but this only runs every 30s so it won't disrupt typing.
+void CheckAndReinstallHooks() {
 	bool hookWasDead = false;
 
 	if (hKeyboardHook) {
 		if (!UnhookWindowsHookEx(hKeyboardHook)) {
-			// Hook was already removed by Windows — this is the bug case
 			hookWasDead = true;
-			OKLog::write("HOOK", "health-check: keyboard hook was DEAD (Windows removed silently) — reinstalling");
+			OKLog::write("HOOK", "zombie-check: keyboard hook was DEAD (Windows removed silently) — reinstalling");
 		} else {
-			// Hook was alive — we just removed it, put it back
-			OKLog::write("HOOK", "health-check: keyboard hook alive (handle=%p)", hKeyboardHook);
+			OKLog::write("HOOK", "zombie-check: keyboard hook alive — re-registering");
 		}
 		hKeyboardHook = NULL;
 	} else {
 		hookWasDead = true;
-		OKLog::write("HOOK", "health-check: keyboard hook handle NULL — reinstalling");
+		OKLog::write("HOOK", "zombie-check: keyboard hook handle NULL — reinstalling");
 	}
 
 	if (hMouseHook) {
@@ -149,13 +155,10 @@ void CheckAndReinstallHooks() {
 		hMouseHook = NULL;
 	}
 
-	// Always reinstall (either to recover from death, or to re-register after alive-check removal)
 	ReinstallHooks();
-	
-	if (hookWasDead) {
-		// Reset foreground caches so the new hook gets fresh state
-		resetForegroundCache();
-	}
+	resetForegroundCache();
+
+	(void)hookWasDead; // logged above; variable kept for future use
 }
 
 void ReinstallHooks() {

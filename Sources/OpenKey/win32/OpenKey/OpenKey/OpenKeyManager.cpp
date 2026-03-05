@@ -33,6 +33,7 @@ static vector<LPCTSTR> _tableCode = {
 extern void OpenKeyInit();
 extern void OpenKeyFree();
 extern void ReinstallHooks();
+extern void QuickHookCheck();
 extern void CheckAndReinstallHooks();
 
 unsigned short  OpenKeyManager::_lastKeyCode = 0;
@@ -55,6 +56,10 @@ void OpenKeyManager::freeEngine() {
 
 void OpenKeyManager::reinstallHooks() {
 	ReinstallHooks();
+}
+
+void OpenKeyManager::quickHookCheck() {
+	QuickHookCheck();
 }
 
 void OpenKeyManager::checkAndReinstallHooks() {

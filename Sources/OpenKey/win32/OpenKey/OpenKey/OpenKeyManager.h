@@ -23,7 +23,8 @@ public:
 	static void initEngine();
 	static void freeEngine();
 	static void reinstallHooks();          // Fix for lock/unlock hook issue
-	static void checkAndReinstallHooks();  // Periodic health-check: detect silently-removed hooks
+	static void quickHookCheck();          // 1s timer: NULL-only check, never removes alive hook
+	static void checkAndReinstallHooks();  // 30s timer: zombie-check via UnhookWindowsHookEx
 
 	static bool checkUpdate(string& newVersion);
 	static std::wstring getUpdateDownloadUrl();  // Returns download URL for current architecture
