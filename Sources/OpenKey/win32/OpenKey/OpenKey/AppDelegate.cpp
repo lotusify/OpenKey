@@ -211,6 +211,7 @@ void AppDelegate::onDefaultConfig() {
 
 void AppDelegate::onToggleVietnamese() {
 	APP_SET_DATA(vLanguage, vLanguage ? 0 : 1);
+	OKLog::write("TOGGLE", "Vietnamese input %s", vLanguage ? "ON" : "OFF");
 	if (mainDialog) {
 		mainDialog->fillData();
 	}

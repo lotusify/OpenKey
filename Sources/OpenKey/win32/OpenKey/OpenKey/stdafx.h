@@ -43,6 +43,7 @@ redistribute your new version, it MUST be open source.
 
 #include "../../../engine/Engine.h"
 
+#include "OKLog.h"
 #include "OpenKeyManager.h"
 #include "OpenKeyHelper.h"
 #include "SystemTrayHelper.h"

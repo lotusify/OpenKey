@@ -89,6 +89,11 @@ static vector<Byte> savedSmartSwitchKeyData; ////use for smart switch key
 
 static bool _hasJustUsedHotKey = false;
 
+// Heartbeat: updated by keyboardHookProcess on every call.
+// Main thread health-check reads this to detect zombie hooks (handle non-NULL but hook dead).
+// Declared volatile so the compiler doesn't optimize away reads from the main thread.
+static volatile ULONGLONG _hookHeartbeat = 0;
+
 // Magic number to identify OpenKey-generated events (prevent hook re-entry)
 // Industry standard practice - UniKey, EVKey use similar approach
 #define OPENKEY_EXTRA_INFO 0x4F4B
@@ -100,35 +105,43 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK mouseHookProcess(int nCode, WPARAM wParam, LPARAM lParam);
 VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime);
 void ReinstallHooks();
+void resetForegroundCache(); // forward declare — defined after static cache vars below
 
 void OpenKeyFree() {
+	OKLog::write("LIFECYCLE", "OpenKeyFree — shutting down");
 	UnhookWindowsHookEx(hMouseHook);
 	UnhookWindowsHookEx(hKeyboardHook);
 	UnhookWinEvent(hSystemEvent);
+	OKLog::close();
 }
 
 void CheckAndReinstallHooks() {
-	// Called periodically from the main thread to detect silently-removed hooks.
-	// Windows can remove WH_KEYBOARD_LL / WH_MOUSE_LL without notice if the
-	// hook callback is too slow. We detect this by attempting UnhookWindowsHookEx:
-	//   - If it succeeds → hook was still registered, we just removed it → reinstall
-	//   - If it fails   → Windows already removed it silently → also reinstall
-	// Either way: always reinstall. The cost is ~20ms Sleep inside ReinstallHooks().
-	bool needReinstall = false;
+	// Called every 1s from the main thread to detect silently-removed hooks.
+	// Windows removes WH_KEYBOARD_LL without notice when the callback is too slow.
+	//
+	// Detection strategy: attempt UnhookWindowsHookEx().
+	//   - Returns TRUE  → hook was still alive; we just removed it unnecessarily.
+	//                     Put it back (reinstall) but this should be rare post-caching.
+	//   - Returns FALSE → Windows already removed it silently. Reinstall immediately.
+	//
+	// With 1s polling: worst-case "dead time" after hook removal is now ~1s instead of 60s.
+	// The UnhookWindowsHookEx call itself is cheap (<1ms) and safe to call from main thread.
+
+	bool hookWasDead = false;
 
 	if (hKeyboardHook) {
 		if (!UnhookWindowsHookEx(hKeyboardHook)) {
-			// Hook was already removed by Windows silently
-			OutputDebugString(_T("OpenKey: CheckAndReinstallHooks - keyboard hook was dead, reinstalling\n"));
+			// Hook was already removed by Windows — this is the bug case
+			hookWasDead = true;
+			OKLog::write("HOOK", "health-check: keyboard hook was DEAD (Windows removed silently) — reinstalling");
 		} else {
-			OutputDebugString(_T("OpenKey: CheckAndReinstallHooks - keyboard hook alive, cycling\n"));
+			// Hook was alive — we just removed it, put it back
+			OKLog::write("HOOK", "health-check: keyboard hook alive (handle=%p)", hKeyboardHook);
 		}
 		hKeyboardHook = NULL;
-		needReinstall = true;
 	} else {
-		// Hook handle is NULL — was never set or already cleared
-		OutputDebugString(_T("OpenKey: CheckAndReinstallHooks - keyboard hook handle was NULL, reinstalling\n"));
-		needReinstall = true;
+		hookWasDead = true;
+		OKLog::write("HOOK", "health-check: keyboard hook handle NULL — reinstalling");
 	}
 
 	if (hMouseHook) {
@@ -136,8 +149,12 @@ void CheckAndReinstallHooks() {
 		hMouseHook = NULL;
 	}
 
-	if (needReinstall) {
-		ReinstallHooks();
+	// Always reinstall (either to recover from death, or to re-register after alive-check removal)
+	ReinstallHooks();
+	
+	if (hookWasDead) {
+		// Reset foreground caches so the new hook gets fresh state
+		resetForegroundCache();
 	}
 }
 
@@ -146,19 +163,19 @@ void ReinstallHooks() {
 	static std::mutex reinstallMutex;
 	std::lock_guard<std::mutex> lock(reinstallMutex);
 	
-	OutputDebugString(_T("OpenKey: ReinstallHooks - Starting...\n"));
+	OKLog::write("HOOK", "ReinstallHooks — starting");
 	
 	// Unhook old hooks (if still active)
 	if (hKeyboardHook) {
 		if (UnhookWindowsHookEx(hKeyboardHook)) {
-			OutputDebugString(_T("OpenKey: ReinstallHooks - Keyboard hook unhooked\n"));
+			OKLog::write("HOOK", "ReinstallHooks — old keyboard hook unhooked");
 		}
 		hKeyboardHook = NULL;
 	}
 	
 	if (hMouseHook) {
 		if (UnhookWindowsHookEx(hMouseHook)) {
-			OutputDebugString(_T("OpenKey: ReinstallHooks - Mouse hook unhooked\n"));
+			OKLog::write("HOOK", "ReinstallHooks — old mouse hook unhooked");
 		}
 		hMouseHook = NULL;
 	}
@@ -187,19 +204,14 @@ void ReinstallHooks() {
 	hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseHookProcess, hInstance, 0);
 	
 	if (hKeyboardHook && hMouseHook) {
-		OutputDebugString(_T("OpenKey: ReinstallHooks - Success!\n"));
+		OKLog::write("HOOK", "ReinstallHooks — success (kb=%p, mouse=%p)", hKeyboardHook, hMouseHook);
 	} else {
-		OutputDebugString(_T("OpenKey: ReinstallHooks - FAILED!\n"));
-		if (!hKeyboardHook) {
-			OutputDebugString(_T("OpenKey: ReinstallHooks - Keyboard hook failed\n"));
-		}
-		if (!hMouseHook) {
-			OutputDebugString(_T("OpenKey: ReinstallHooks - Mouse hook failed\n"));
-		}
+		OKLog::write("HOOK", "ReinstallHooks — FAILED (kb=%p, mouse=%p)", hKeyboardHook, hMouseHook);
 	}
 }
 
 void OpenKeyInit() {
+	OKLog::init();
 	APP_GET_DATA(vLanguage, 1);
 	APP_GET_DATA(vInputType, 0);
 	vFreeMark = 0;
@@ -294,6 +306,9 @@ void OpenKeyInit() {
 	hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardHookProcess, hInstance, 0);
 	hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseHookProcess, hInstance, 0);
 	hSystemEvent = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, NULL, winEventProcCallback, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+	OKLog::write("LIFECYCLE", "OpenKeyInit done — lang=%d inputType=%d codeTable=%d spelling=%d kb=%p mouse=%p",
+		vLanguage, vInputType, vCodeTable, vCheckSpelling, hKeyboardHook, hMouseHook);
 }
 
 void saveSmartSwitchKeyData() {
@@ -652,6 +667,9 @@ inline void resetImeSessionCache() {
 }
 
 LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
+	// Update heartbeat so main-thread health-check can detect zombie hooks
+	_hookHeartbeat = GetTickCount64();
+
 	keyboardData = (KBDLLHOOKSTRUCT *)lParam;
 	//ignore my event (check for OpenKey magic number)
 	if (keyboardData->dwExtraInfo == OPENKEY_EXTRA_INFO) {
@@ -874,6 +892,7 @@ VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, H
 	//smart switch key
 	if (vUseSmartSwitchKey || vRememberCode) {
 		string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
+		OKLog::write("FOREGROUND", "app changed -> %s", exe.c_str());
 		if (exe.compare("explorer.exe") == 0) //dont apply with windows explorer
 			return;
 		// Force EN for excluded apps
@@ -907,5 +926,9 @@ VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, H
 			SendMessage(HWND_BROADCAST, WM_CHAR, VK_BACK, 0L);
 			SendMessage(HWND_BROADCAST, WM_CHAR, VK_BACK, 0L);
 		}
+	} else {
+		// Smart switch off — still log the foreground change
+		string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
+		OKLog::write("FOREGROUND", "app changed -> %s", exe.c_str());
 	}
 }

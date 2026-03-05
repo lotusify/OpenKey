@@ -14,6 +14,7 @@ redistribute your new version, it MUST be open source.
 #include "SystemTrayHelper.h"
 #include "AppDelegate.h"
 #include "OpenKeyManager.h"
+#include "OKLog.h"
 #include <Wtsapi32.h>
 
 #pragma comment(lib, "Wtsapi32.lib")
@@ -21,10 +22,10 @@ redistribute your new version, it MUST be open source.
 #define TIMER_REINSTALL_HOOKS    1001
 #define TIMER_HOOK_HEALTH_CHECK  1002
 
-// Safety-net: reinstall hooks every 60s to recover from any edge case
-// where Windows silently removed the hook. The primary fix is the IME cache
-// in keyboardHookProcess which removes the slow SendMessageTimeout per keystroke.
-#define HOOK_HEALTH_CHECK_INTERVAL_MS 60000
+// Safety-net: check hook health every 1s.
+// When Windows silently removes the hook, we detect it fast and reinstall immediately.
+// The check is cheap (just reads hKeyboardHook validity) — only reinstalls on actual death.
+#define HOOK_HEALTH_CHECK_INTERVAL_MS 1000
 
 #define WM_TRAYMESSAGE (WM_USER + 1)
 #define TRAY_ICONUID 100
@@ -112,13 +113,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 	// Handle session change (lock/unlock)
 	case WM_WTSSESSION_CHANGE:
 		if (wParam == WTS_SESSION_LOCK) {
-			OutputDebugString(_T("OpenKey: Session locked\n"));
+			OKLog::write("SESSION", "screen locked");
 		} else if (wParam == WTS_SESSION_UNLOCK) {
 			// Debounce: Only process if at least 2 seconds apart
 			ULONGLONG now = GetTickCount64();
 			if (lastUnlockTime == 0 || now - lastUnlockTime > SESSION_UNLOCK_DEBOUNCE_MS) {
 				lastUnlockTime = now;
-				OutputDebugString(_T("OpenKey: Session unlocked. Scheduling hook reinstall...\n"));
+				OKLog::write("SESSION", "screen unlocked — scheduling hook reinstall in 500ms");
 				
 				// Use timer to delay 500ms, then reinstall from main thread
 				SetTimer(hWnd, TIMER_REINSTALL_HOOKS, 500, NULL);
@@ -130,13 +131,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 	case WM_TIMER:
 		if (wParam == TIMER_REINSTALL_HOOKS) {
 			KillTimer(hWnd, TIMER_REINSTALL_HOOKS);
-			
-			// CRITICAL: Called from main thread (has message loop)
-			OutputDebugString(_T("OpenKey: Reinstalling hooks from main thread...\n"));
+			OKLog::write("HOOK", "session-unlock timer fired — reinstalling hooks from main thread");
 			OpenKeyManager::reinstallHooks();
 		} else if (wParam == TIMER_HOOK_HEALTH_CHECK) {
 			// Periodic health-check: detect and recover from silently-removed hooks
-			OutputDebugString(_T("OpenKey: Hook health-check tick\n"));
+			// (verbose logging happens inside CheckAndReinstallHooks)
 			OpenKeyManager::checkAndReinstallHooks();
 		}
 		break;
