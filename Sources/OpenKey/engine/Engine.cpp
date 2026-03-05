@@ -750,6 +750,14 @@ void handleOldMark() {
         }
     }
     
+    // rule 4: "gi-" cluster — the I is part of the consonant, not the rhyme vowel.
+    // Old orthography would otherwise place the tone on I (e.g. "gíac" instead of "giác").
+    // If VSI points to I and the preceding character is G, shift mark to VSI+1 (the real vowel).
+    if (CHR(VSI) == KEY_I && VSI >= 1 && CHR(VSI - 1) == KEY_G) {
+        VWSM = VSI + 1;
+        hBPC = _index - VWSM;
+    }
+    
     hNCC = hBPC;
 }
 
