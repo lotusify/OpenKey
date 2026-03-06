@@ -94,6 +94,16 @@ static bool _hasJustUsedHotKey = false;
 // Declared volatile so the compiler doesn't optimize away reads from the main thread.
 static volatile ULONGLONG _hookHeartbeat = 0;
 
+// SysTray HWND — set by SystemTrayHelper on WM_CREATE so winEventProcCallback can
+// post timers back to the main thread for debouncing foreground changes.
+static HWND _sysTrayHwnd = NULL;
+void SetSysTrayHwnd(HWND hWnd) { _sysTrayHwnd = hWnd; }
+
+// Timer ID used for debouncing foreground-change session resets.
+// Defined here so both winEventProcCallback and SystemTrayHelper WM_TIMER can share it.
+#define TIMER_FOREGROUND_DEBOUNCE 1004
+#define FOREGROUND_DEBOUNCE_MS    150
+
 // Magic number to identify OpenKey-generated events (prevent hook re-entry)
 // Industry standard practice - UniKey, EVKey use similar approach
 #define OPENKEY_EXTRA_INFO 0x4F4B
@@ -128,37 +138,51 @@ void QuickHookCheck() {
 	// Handle non-NULL → hook is presumed alive; zombie detection handled by 30s timer.
 }
 
-// Called every 30s from the main thread.
-// Uses UnhookWindowsHookEx to detect "zombie" hooks: handle is non-NULL but
-// Windows has already silently removed the hook underneath us.
-//   UnhookWindowsHookEx returns TRUE  → hook was alive; we just removed it → reinstall.
-//   UnhookWindowsHookEx returns FALSE → Windows already removed it → reinstall.
-// Either way we reinstall, but this only runs every 30s so it won't disrupt typing.
-void CheckAndReinstallHooks() {
-	bool hookWasDead = false;
+// Re-register hooks only — does NOT reset typing state (_flag, _keycode, session).
+// Used by zombie-check when hook was alive: we had to remove it to test liveness,
+// now we put it back without disturbing an in-progress word.
+static void RegisterHooksOnly() {
+	static std::mutex registerMutex;
+	std::lock_guard<std::mutex> lock(registerMutex);
 
+	HINSTANCE hInstance = GetModuleHandle(NULL);
+	hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardHookProcess, hInstance, 0);
+	hMouseHook    = SetWindowsHookEx(WH_MOUSE_LL,    mouseHookProcess,    hInstance, 0);
+
+	if (hKeyboardHook && hMouseHook) {
+		OKLog::write("HOOK", "RegisterHooksOnly — success (kb=%p, mouse=%p)", hKeyboardHook, hMouseHook);
+	} else {
+		OKLog::write("HOOK", "RegisterHooksOnly — FAILED (kb=%p, mouse=%p)", hKeyboardHook, hMouseHook);
+	}
+}
+
+// Called every 30s from the main thread.
+// Uses UnhookWindowsHookEx to detect "zombie" hooks: handle non-NULL but Windows
+// has already silently removed the hook underneath us.
+//   Returns TRUE  → hook was alive; we just removed it → re-register only (no state reset).
+//   Returns FALSE → hook was dead → full reinstall + state reset.
+void CheckAndReinstallHooks() {
 	if (hKeyboardHook) {
 		if (!UnhookWindowsHookEx(hKeyboardHook)) {
-			hookWasDead = true;
-			OKLog::write("HOOK", "zombie-check: keyboard hook was DEAD (Windows removed silently) — reinstalling");
+			// Hook was dead — full reinstall needed
+			OKLog::write("HOOK", "zombie-check: keyboard hook DEAD — full reinstall");
+			hKeyboardHook = NULL;
+			if (hMouseHook) { UnhookWindowsHookEx(hMouseHook); hMouseHook = NULL; }
+			ReinstallHooks();      // resets state + re-registers
+			resetForegroundCache();
 		} else {
-			OKLog::write("HOOK", "zombie-check: keyboard hook alive — re-registering");
+			// Hook was alive — we just removed it to test; put it back without touching state
+			OKLog::write("HOOK", "zombie-check: keyboard hook alive — re-registering only");
+			hKeyboardHook = NULL;
+			if (hMouseHook) { UnhookWindowsHookEx(hMouseHook); hMouseHook = NULL; }
+			RegisterHooksOnly();   // no state reset — typing session preserved
 		}
-		hKeyboardHook = NULL;
 	} else {
-		hookWasDead = true;
-		OKLog::write("HOOK", "zombie-check: keyboard hook handle NULL — reinstalling");
+		OKLog::write("HOOK", "zombie-check: keyboard hook handle NULL — full reinstall");
+		if (hMouseHook) { UnhookWindowsHookEx(hMouseHook); hMouseHook = NULL; }
+		ReinstallHooks();
+		resetForegroundCache();
 	}
-
-	if (hMouseHook) {
-		UnhookWindowsHookEx(hMouseHook);
-		hMouseHook = NULL;
-	}
-
-	ReinstallHooks();
-	resetForegroundCache();
-
-	(void)hookWasDead; // logged above; variable kept for future use
 }
 
 void ReinstallHooks() {
@@ -170,16 +194,12 @@ void ReinstallHooks() {
 	
 	// Unhook old hooks (if still active)
 	if (hKeyboardHook) {
-		if (UnhookWindowsHookEx(hKeyboardHook)) {
-			OKLog::write("HOOK", "ReinstallHooks — old keyboard hook unhooked");
-		}
+		UnhookWindowsHookEx(hKeyboardHook);
 		hKeyboardHook = NULL;
 	}
 	
 	if (hMouseHook) {
-		if (UnhookWindowsHookEx(hMouseHook)) {
-			OKLog::write("HOOK", "ReinstallHooks — old mouse hook unhooked");
-		}
+		UnhookWindowsHookEx(hMouseHook);
 		hMouseHook = NULL;
 	}
 	
@@ -887,15 +907,14 @@ LRESULT CALLBACK mouseHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	return CallNextHookEx(hMouseHook, nCode, wParam, lParam);
 }
 
-VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
-	// Foreground window changed — invalidate all foreground-dependent caches
-	// (IME state, HWND, and app name).
-	resetForegroundCache();
+// Called from SystemTrayHelper WM_TIMER after FOREGROUND_DEBOUNCE_MS of stable foreground.
+// Contains the original foreground-change logic (smart switch, session reset).
+// Separated from winEventProcCallback to allow debouncing.
+void OnForegroundSettled() {
+	string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
+	OKLog::write("FOREGROUND", "app settled -> %s", exe.c_str());
 
-	//smart switch key
 	if (vUseSmartSwitchKey || vRememberCode) {
-		string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
-		OKLog::write("FOREGROUND", "app changed -> %s", exe.c_str());
 		if (exe.compare("explorer.exe") == 0) //dont apply with windows explorer
 			return;
 		// Force EN for excluded apps
@@ -905,7 +924,7 @@ VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, H
 				AppDelegate::getInstance()->onInputMethodChangedFromHotKey();
 			}
 			startNewSession();
-			return; // skip smart switch key logic
+			return;
 		}
 		_languageTemp = getAppInputMethodStatus(exe, vLanguage | (vCodeTable << 1));
 		vTempOffEngine(false);
@@ -918,20 +937,35 @@ VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, H
 			}
 		}
 		startNewSession();
-		if (vRememberCode && (_languageTemp >> 1) != vCodeTable) { //for remember table code feature
+		if (vRememberCode && (_languageTemp >> 1) != vCodeTable) {
 			if (_languageTemp != -1) {
 				AppDelegate::getInstance()->onTableCode(_languageTemp >> 1);
 			} else {
 				saveSmartSwitchKeyData();
 			}
 		}
-		if (vSupportMetroApp && exe.compare("ApplicationFrameHost.exe") == 0) {//Metro App
+		if (vSupportMetroApp && exe.compare("ApplicationFrameHost.exe") == 0) {
 			SendMessage(HWND_BROADCAST, WM_CHAR, VK_BACK, 0L);
 			SendMessage(HWND_BROADCAST, WM_CHAR, VK_BACK, 0L);
 		}
 	} else {
-		// Smart switch off — still log the foreground change
-		string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
-		OKLog::write("FOREGROUND", "app changed -> %s", exe.c_str());
+		startNewSession();
+	}
+}
+
+VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
+	// Foreground window changed — invalidate caches immediately (cheap, always safe).
+	resetForegroundCache();
+
+	// Debounce startNewSession() — rapid foreground flicker (Alt+Tab animation, OS popups,
+	// toolbar focus) fires this callback multiple times within ~100ms. If we called
+	// startNewSession() immediately every time, an in-progress word gets nuked mid-type.
+	//
+	// Strategy: reset a 150ms one-shot timer on every foreground event.
+	// Only when the foreground has been stable for 150ms do we actually clear the session.
+	// resetForegroundCache() above already ran immediately so the new app's context is fresh.
+	if (_sysTrayHwnd) {
+		KillTimer(_sysTrayHwnd, TIMER_FOREGROUND_DEBOUNCE);
+		SetTimer(_sysTrayHwnd, TIMER_FOREGROUND_DEBOUNCE, FOREGROUND_DEBOUNCE_MS, NULL);
 	}
 }

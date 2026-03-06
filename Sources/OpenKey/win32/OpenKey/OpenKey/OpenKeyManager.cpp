@@ -35,6 +35,8 @@ extern void OpenKeyFree();
 extern void ReinstallHooks();
 extern void QuickHookCheck();
 extern void CheckAndReinstallHooks();
+extern void SetSysTrayHwnd(HWND hWnd);
+extern void OnForegroundSettled();
 
 unsigned short  OpenKeyManager::_lastKeyCode = 0;
 
@@ -64,6 +66,14 @@ void OpenKeyManager::quickHookCheck() {
 
 void OpenKeyManager::checkAndReinstallHooks() {
 	CheckAndReinstallHooks();
+}
+
+void OpenKeyManager::setSysTrayHwnd(HWND hWnd) {
+	SetSysTrayHwnd(hWnd);
+}
+
+void OpenKeyManager::onForegroundSettled() {
+	OnForegroundSettled();
 }
 
 bool OpenKeyManager::checkUpdate(string& newVersion) {

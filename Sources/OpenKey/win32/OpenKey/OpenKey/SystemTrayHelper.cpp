@@ -22,6 +22,7 @@ redistribute your new version, it MUST be open source.
 #define TIMER_REINSTALL_HOOKS    1001
 #define TIMER_HOOK_HEALTH_CHECK  1002   // 1s  — NULL-only check (cheap, no hook removal)
 #define TIMER_HOOK_ZOMBIE_CHECK  1003   // 30s — zombie-check via UnhookWindowsHookEx
+#define TIMER_FOREGROUND_DEBOUNCE 1004  // 150ms one-shot: fires after foreground settles
 
 // 1s: cheap NULL check — detects hook killed by Windows (handle goes NULL).
 // Does NOT call UnhookWindowsHookEx, so it never removes an alive hook.
@@ -110,6 +111,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 		// Start periodic hook health-check timer (every 30 seconds)
 		SetTimer(hWnd, TIMER_HOOK_HEALTH_CHECK, HOOK_HEALTH_CHECK_INTERVAL_MS, NULL);
 		SetTimer(hWnd, TIMER_HOOK_ZOMBIE_CHECK,  HOOK_ZOMBIE_CHECK_INTERVAL_MS,  NULL);
+
+		// Pass hWnd to engine so winEventProcCallback can post debounce timers here
+		OpenKeyManager::setSysTrayHwnd(hWnd);
 		break;
 	case WM_USER+2019:
 		AppDelegate::getInstance()->onControlPanel();
@@ -144,6 +148,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 		} else if (wParam == TIMER_HOOK_ZOMBIE_CHECK) {
 			// 30s: full zombie-check via UnhookWindowsHookEx
 			OpenKeyManager::checkAndReinstallHooks();
+		} else if (wParam == TIMER_FOREGROUND_DEBOUNCE) {
+			// Foreground has been stable for 150ms — safe to clear session and apply smart-switch
+			KillTimer(hWnd, TIMER_FOREGROUND_DEBOUNCE);
+			OpenKeyManager::onForegroundSettled();
 		}
 		break;
 	case WM_TRAYMESSAGE: {

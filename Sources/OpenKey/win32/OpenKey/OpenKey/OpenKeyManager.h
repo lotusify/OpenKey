@@ -25,6 +25,8 @@ public:
 	static void reinstallHooks();          // Fix for lock/unlock hook issue
 	static void quickHookCheck();          // 1s timer: NULL-only check, never removes alive hook
 	static void checkAndReinstallHooks();  // 30s timer: zombie-check via UnhookWindowsHookEx
+	static void setSysTrayHwnd(HWND hWnd); // Pass systray HWND for foreground debounce timer
+	static void onForegroundSettled();     // Called after 150ms debounce: smart-switch + session reset
 
 	static bool checkUpdate(string& newVersion);
 	static std::wstring getUpdateDownloadUrl();  // Returns download URL for current architecture
