@@ -914,18 +914,21 @@ void OnForegroundSettled() {
 	string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
 	OKLog::write("FOREGROUND", "app settled -> %s", exe.c_str());
 
+	// Excluded app check runs unconditionally — independent of smart switch setting.
+	// When switching to an excluded app, force EN mode and clear session.
+	if (isExcludedApp(exe)) {
+		OKLog::write("FOREGROUND", "excluded app — forcing EN");
+		if (vLanguage != 0) {
+			vLanguage = 0;
+			AppDelegate::getInstance()->onInputMethodChangedFromHotKey();
+		}
+		startNewSession();
+		return;
+	}
+
 	if (vUseSmartSwitchKey || vRememberCode) {
 		if (exe.compare("explorer.exe") == 0) //dont apply with windows explorer
 			return;
-		// Force EN for excluded apps
-		if (isExcludedApp(exe)) {
-			if (vLanguage != 0) {
-				vLanguage = 0;
-				AppDelegate::getInstance()->onInputMethodChangedFromHotKey();
-			}
-			startNewSession();
-			return;
-		}
 		_languageTemp = getAppInputMethodStatus(exe, vLanguage | (vCodeTable << 1));
 		vTempOffEngine(false);
 		if (vUseSmartSwitchKey && (_languageTemp & 0x01) != vLanguage) {
