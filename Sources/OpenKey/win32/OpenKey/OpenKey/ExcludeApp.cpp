@@ -22,7 +22,9 @@ static const LPCTSTR EXCLUDED_APPS_KEY = TEXT("excludedApps");
 static std::unordered_set<std::string> _excludedApps;
 
 bool isExcludedApp(const std::string& exeName) {
-    return _excludedApps.count(exeName) > 0;
+    std::string lower = exeName;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    return _excludedApps.count(lower) > 0;
 }
 
 void addExcludedApp(const std::string& exeName) {
