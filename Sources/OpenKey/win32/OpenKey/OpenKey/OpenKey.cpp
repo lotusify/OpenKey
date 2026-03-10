@@ -78,6 +78,11 @@ static vector<Uint16> _newCharString;
 static Uint16 _newCharSize;
 static bool _willSendControlKey = false;
 
+// Batch input buffer: collects all backspaces + new chars into a single SendInput call.
+// Inspired by GoNhanh's TextSender — avoids N separate SendInput calls (one per char)
+// and eliminates timing gaps between backspaces and new chars that cause glitches.
+static vector<INPUT> _batchInputs;
+
 static Uint16 _uniChar[2];
 static int _i, _j, _k;
 static Uint32 _tempChar;
@@ -452,6 +457,107 @@ static void SendBackspace() {
 	}
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Batch input helpers — inspired by GoNhanh's TextSender pattern.
+// Instead of calling SendInput(2,...) once per character (N round-trips to win32),
+// we queue everything into _batchInputs and flush with a single SendInput call.
+// This eliminates inter-key timing gaps that cause "lost character" bugs.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Queue a backspace into the batch. Preserves VNI/Unicode Compound _syncKey logic.
+// Does NOT send to Metro App via SendMessage — Metro App uses the old SendBackspace path.
+static void QueueBackspace() {
+	_batchInputs.push_back(backspaceEvent[0]);
+	_batchInputs.push_back(backspaceEvent[1]);
+	if (IS_DOUBLE_CODE(vCodeTable)) { // VNI or Unicode Compound needs extra backspace for double-width chars
+		if (_syncKey.back() > 1) {
+			_batchInputs.push_back(backspaceEvent[0]);
+			_batchInputs.push_back(backspaceEvent[1]);
+		}
+		_syncKey.pop_back();
+	}
+}
+
+// Queue a Unicode key event (down or up) into the batch.
+static inline void QueueUnicodeEvent(const Uint16& unicode, const bool& isPress) {
+	INPUT input;
+	input.type = INPUT_KEYBOARD;
+	input.ki.wVk = 0;
+	input.ki.wScan = unicode;
+	input.ki.time = 0;
+	input.ki.dwFlags = (isPress ? 0 : KEYEVENTF_KEYUP) | KEYEVENTF_UNICODE;
+	input.ki.dwExtraInfo = OPENKEY_EXTRA_INFO;
+	_batchInputs.push_back(input);
+}
+
+// Queue a virtual-key event (down or up) into the batch.
+static inline void QueueVkEvent(const Uint16& vkCode, const bool& isPress, const DWORD& flag = 0) {
+	INPUT input;
+	input.type = INPUT_KEYBOARD;
+	input.ki.dwFlags = isPress ? flag : flag | KEYEVENTF_KEYUP;
+	input.ki.wVk = vkCode;
+	input.ki.wScan = 0;
+	input.ki.time = 0;
+	input.ki.dwExtraInfo = OPENKEY_EXTRA_INFO;
+	_batchInputs.push_back(input);
+}
+
+// Queue a key code into the batch — mirrors SendKeyCode() exactly but queues instead of sending.
+static void QueueKeyCode(Uint32 data) {
+	_newChar = (Uint16)data;
+	if (!(data & CHAR_CODE_MASK)) {
+		if (IS_DOUBLE_CODE(vCodeTable)) InsertKeyLength(1);
+		_newChar = keyCodeToCharacter(data);
+		if (_newChar == 0) {
+			_newChar = (Uint16)data;
+			QueueVkEvent(_newChar, true);
+			QueueVkEvent(_newChar, false);
+		} else {
+			QueueUnicodeEvent(_newChar, true);
+			QueueUnicodeEvent(_newChar, false);
+		}
+	} else {
+		if (vCodeTable == 0) { // Unicode (NFC)
+			QueueUnicodeEvent(_newChar, true);
+			QueueUnicodeEvent(_newChar, false);
+		} else if (vCodeTable == 1 || vCodeTable == 2 || vCodeTable == 4) { // TCVN3, VNI Windows, CP1258
+			_newCharHi = HIBYTE(_newChar);
+			_newChar   = LOBYTE(_newChar);
+			QueueUnicodeEvent(_newChar, true);
+			QueueUnicodeEvent(_newChar, false);
+			if (_newCharHi > 32) {
+				if (vCodeTable == 2) InsertKeyLength(2);
+				QueueUnicodeEvent(_newCharHi, true);
+				QueueUnicodeEvent(_newCharHi, false);
+			} else {
+				if (vCodeTable == 2) InsertKeyLength(1);
+			}
+		} else if (vCodeTable == 3) { // Unicode Compound (NFD)
+			_newCharHi = (_newChar >> 13);
+			_newChar  &= 0x1FFF;
+			_uniChar[0] = _newChar;
+			_uniChar[1] = _newCharHi > 0 ? (_unicodeCompoundMark[_newCharHi - 1]) : 0;
+			InsertKeyLength(_newCharHi > 0 ? 2 : 1);
+			QueueUnicodeEvent(_uniChar[0], true);
+			QueueUnicodeEvent(_uniChar[0], false);
+			if (_newCharHi > 0) {
+				QueueUnicodeEvent(_uniChar[1], true);
+				QueueUnicodeEvent(_uniChar[1], false);
+			}
+		}
+	}
+}
+
+// Flush all queued inputs with a single SendInput call, then clear the queue.
+static void FlushBatchInputs() {
+	if (!_batchInputs.empty()) {
+		SendInput((UINT)_batchInputs.size(), _batchInputs.data(), sizeof(INPUT));
+		_batchInputs.clear();
+	}
+}
+
+
+
 static void SendEmptyCharacter() {
 	if (IS_DOUBLE_CODE(vCodeTable)) //VNI or Unicode Compound
 		InsertKeyLength(1);
@@ -534,6 +640,11 @@ static void SendNewCharString(const bool& dataFromMacro = false) {
 	}
 
 	OpenKeyHelper::setClipboardText((LPCTSTR)_newCharString.data(), _newCharSize + 1, CF_UNICODETEXT);
+
+	// Small yield: allow Windows clipboard subsystem to process the SetClipboardData()
+	// before the target app receives Shift+Insert. Without this, fast apps (Chromium, etc.)
+	// can read an empty/stale clipboard and paste nothing — causing the "lost character" bug.
+	Sleep(2);
 
 	//Send shift + insert
 	SendCombineKey(KEY_LEFT_SHIFT, VK_INSERT, 0, KEYEVENTF_EXTENDEDKEY);
@@ -674,16 +785,19 @@ static bool UnsetModifierMask(const Uint16& vkCode) {
 // single keypress, causing intermittent hook removal without any warning.
 //
 // Cache strategy:
-//   - Re-check only when the foreground window changes, OR every 500ms.
+//   - Re-check only when the foreground window changes, OR every 200ms.
 //   - resetForegroundCache() is called when app focus changes (winEventProcCallback)
 //     and on mouse button events.
+//   - _forcedImeRecheck: set on foreground change to force re-check on the very
+//     first keystroke after switching apps (avoids stale cache blocking input).
 //
 // Foreground HWND cache — avoids calling GetForegroundWindow() + ImmGetDefaultIMEWnd()
 // on every keystroke. These are also invalidated on foreground change.
 static bool _cachedImeState = false;
 static uint64_t _lastImeCheckTime = 0;
 static HWND _lastCheckedImeHwnd = NULL;
-static const uint64_t IME_CHECK_INTERVAL_MS = 500; // Re-check interval
+static bool _forcedImeRecheck = false; // force re-check on first key after focus change
+static const uint64_t IME_CHECK_INTERVAL_MS = 200; // Re-check interval (reduced from 500ms)
 
 static HWND _cachedForegroundHwnd = NULL; // Cached GetForegroundWindow() result
 static HWND _cachedDefaultImeHwnd = NULL; // Cached ImmGetDefaultIMEWnd() result
@@ -695,6 +809,7 @@ inline void resetForegroundCache() {
 	_lastCheckedImeHwnd = NULL;
 	_cachedForegroundHwnd = NULL;
 	_cachedDefaultImeHwnd = NULL;
+	_forcedImeRecheck = true; // force re-check on very first keystroke in new app
 	OpenKeyHelper::invalidateAppNameCache();
 }
 
@@ -730,9 +845,11 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	HWND hIME = _cachedDefaultImeHwnd;
 	
 	uint64_t now = GetTickCount64();
-	bool needImeCheck = (hIME != _lastCheckedImeHwnd) || (now - _lastImeCheckTime > IME_CHECK_INTERVAL_MS);
+	// needImeCheck: re-check if HWND changed, interval elapsed, OR forced (first key after focus change)
+	bool needImeCheck = _forcedImeRecheck || (hIME != _lastCheckedImeHwnd) || (now - _lastImeCheckTime > IME_CHECK_INTERVAL_MS);
 	
 	if (needImeCheck) {
+		_forcedImeRecheck = false; // clear forced flag after re-check
 		bool imeOn = false;
 		if (hIME != NULL) {
 			DWORD_PTR dwResult = 0;
@@ -746,8 +863,10 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 		_lastCheckedImeHwnd = hIME;
 	}
 	
-	// Skip IME check for MS Office apps that falsely report IME as ON
-	if (_cachedImeState && !shouldSkipImeCheck()) {
+	// Only block input when OpenKey is in Vietnamese mode AND IME is genuinely active.
+	// When in English mode (vLanguage==0), always pass through — there's no reason to block.
+	// Skip IME check for apps that falsely report IME as ON (MS Office, etc.).
+	if (vLanguage == 1 && _cachedImeState && !shouldSkipImeCheck()) {
 		// Log once per foreground session — avoid flooding on every keystroke
 		static HWND _lastImeBlockLoggedHwnd = NULL;
 		if (hWnd != _lastImeBlockLoggedHwnd) {
@@ -875,17 +994,28 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 				}
 			}
 			
-			//send backspace
-			if (pData->backspaceCount > 0 && pData->backspaceCount < MAX_BUFF) {
-				for (_i = 0; _i < pData->backspaceCount; _i++) {
-					SendBackspace();
-				}
-			}
-
-			//send new character
+			//send backspace + new character
+			// Batch strategy (inspired by GoNhanh's TextSender):
+			//   - For normal apps: queue backspaces + chars → single SendInput call.
+			//     This eliminates timing gaps between individual SendInput(2,...) calls
+			//     that can cause apps to miss characters at high typing speed.
+			//   - Metro App: must use old sequential path (needs SendMessage in between).
+			//   - Clipboard path (!vSendKeyStepByStep): keeps existing behavior.
 			if (!vSendKeyStepByStep) {
+				// Clipboard path — unchanged (handles complex char data via Shift+Insert)
+				if (pData->backspaceCount > 0 && pData->backspaceCount < MAX_BUFF) {
+					for (_i = 0; _i < pData->backspaceCount; _i++) {
+						SendBackspace();
+					}
+				}
 				SendNewCharString();
-			} else {
+			} else if (vSupportMetroApp && OpenKeyHelper::getLastAppExecuteName().compare("ApplicationFrameHost.exe") == 0) {
+				// Metro App: sequential path (SendMessage cannot be batched in SendInput)
+				if (pData->backspaceCount > 0 && pData->backspaceCount < MAX_BUFF) {
+					for (_i = 0; _i < pData->backspaceCount; _i++) {
+						SendBackspace();
+					}
+				}
 				if (pData->newCharCount > 0 && pData->newCharCount <= MAX_BUFF) {
 					for (int i = pData->newCharCount - 1; i >= 0; i--) {
 						SendKeyCode(pData->charData[i]);
@@ -894,6 +1024,39 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 				if (pData->code == vRestore || pData->code == vRestoreAndStartNewSession) {
 					SendKeyCode(_keycode | ((_flag & MASK_CAPITAL) || (_flag & MASK_SHIFT) ? CAPS_MASK : 0));
 				}
+				if (pData->code == vRestoreAndStartNewSession) {
+					OKLog::write("SESSION", "startNewSession — vRestoreAndStartNewSession (key=0x%02X)", _keycode);
+					startNewSession();
+				}
+			} else {
+				// ★ Batch path — default for all normal apps (no Metro App, no clipboard)
+				// Build entire replacement operation as one INPUT array:
+				//   [backspace×N] + [char×M] → single SendInput call
+				_batchInputs.clear();
+				_batchInputs.reserve((pData->backspaceCount + pData->newCharCount + 1) * 4);
+
+				// Queue backspaces (preserves VNI _syncKey logic inside QueueBackspace)
+				if (pData->backspaceCount > 0 && pData->backspaceCount < MAX_BUFF) {
+					for (_i = 0; _i < pData->backspaceCount; _i++) {
+						QueueBackspace();
+					}
+				}
+
+				// Queue new characters
+				if (pData->newCharCount > 0 && pData->newCharCount <= MAX_BUFF) {
+					for (int i = pData->newCharCount - 1; i >= 0; i--) {
+						QueueKeyCode(pData->charData[i]);
+					}
+				}
+
+				// Queue restore key (when word is invalid, re-emit the triggering key)
+				if (pData->code == vRestore || pData->code == vRestoreAndStartNewSession) {
+					QueueKeyCode(_keycode | ((_flag & MASK_CAPITAL) || (_flag & MASK_SHIFT) ? CAPS_MASK : 0));
+				}
+
+				// ONE SendInput call for everything — no race conditions, no timing gaps
+				FlushBatchInputs();
+
 				if (pData->code == vRestoreAndStartNewSession) {
 					OKLog::write("SESSION", "startNewSession — vRestoreAndStartNewSession (key=0x%02X)", _keycode);
 					startNewSession();

@@ -28,9 +28,9 @@ redistribute your new version, it MUST be open source.
 // Does NOT call UnhookWindowsHookEx, so it never removes an alive hook.
 #define HOOK_HEALTH_CHECK_INTERVAL_MS  1000
 
-// 30s: zombie-check — detects non-NULL but dead handles using UnhookWindowsHookEx.
+// 10s: zombie-check — detects non-NULL but dead handles using UnhookWindowsHookEx.
 // Runs infrequently so it won't interrupt typing sessions.
-#define HOOK_ZOMBIE_CHECK_INTERVAL_MS  30000
+#define HOOK_ZOMBIE_CHECK_INTERVAL_MS  10000
 
 #define WM_TRAYMESSAGE (WM_USER + 1)
 #define TRAY_ICONUID 100
