@@ -77,52 +77,43 @@ void OpenKeyManager::onForegroundSettled() {
 }
 
 bool OpenKeyManager::checkUpdate(string& newVersion) {
-	wstring dataW = OpenKeyHelper::getContentOfUrl(L"https://raw.githubusercontent.com/lotusify/OpenKey/master/version.json");
+	// Use GitHub Releases API — picks up the latest release automatically whenever
+	// the workflow creates a new release, with no need to update version.json manually.
+	// API: GET /repos/{owner}/{repo}/releases/latest  → JSON with "tag_name": "v2.0.6"
+	wstring dataW = OpenKeyHelper::getContentOfUrl(
+		L"https://api.github.com/repos/lotusify/OpenKey/releases/latest");
 	string data = wideStringToUtf8(dataW);
 
-	//simple parse
-	constexpr char versionNameStr[] = "\"versionName\":";
-	constexpr char versionCodeStr[] = "\"versionCode\":";
-	constexpr char numbers[] = "0123456789";
-	size_t posBegin = string::npos;
-	size_t posEnd = string::npos;
+	if (data.empty()) return false;
 
-	posBegin = data.find("latestWinVersion");
-	posBegin = data.find(versionNameStr, posBegin);
-	posBegin += (sizeof(versionNameStr) - 1);
-	posBegin = data.find('\"', posBegin);
-	posBegin = data.find_first_of(numbers, posBegin);
+	// Find "tag_name":"v2.0.6"  (GitHub always quotes both key and value)
+	const string tagKey = "\"tag_name\"";
+	size_t pos = data.find(tagKey);
+	if (pos == string::npos) return false;
 
-	posEnd = data.find('\"', posBegin);
+	// Skip past the key, colon, whitespace, and opening quote
+	pos = data.find('\"', pos + tagKey.size()); // opening quote of value
+	if (pos == string::npos) return false;
+	pos++; // step inside the quote
 
-	if (posBegin == string::npos || posEnd == string::npos) {
+	// Skip leading 'v' if present (tag format is "v2.0.6")
+	if (pos < data.size() && data[pos] == 'v') pos++;
+
+	size_t end = data.find('\"', pos); // closing quote
+	if (end == string::npos || end <= pos) return false;
+
+	newVersion = data.substr(pos, end - pos); // e.g. "2.0.6"
+
+	// Parse major.minor.patch from tag string
+	int major = 0, minor = 0, patch = 0;
+	if (sscanf_s(newVersion.c_str(), "%d.%d.%d", &major, &minor, &patch) != 3)
 		return false;
-	}
 
-	newVersion = data.substr(posBegin, posEnd - posBegin);
+	// Pack into DWORD same way getVersionNumber() does: (major<<16)|(minor<<8)|patch
+	DWORD remoteCode = ((DWORD)major << 16) | ((DWORD)minor << 8) | (DWORD)patch;
+	DWORD localCode  = OpenKeyHelper::getVersionNumber();
 
-	posBegin = posEnd;
-	posBegin = data.find(versionCodeStr, posBegin);
-	posBegin += (sizeof(versionCodeStr) - 1);
-
-	posEnd = data.find("}", posBegin);
-
-	if (posBegin == string::npos || posEnd == string::npos) {
-		return false;
-	}
-
-	auto shiftVersion = [](DWORD version) {
-		return (version << 16) | (version & 0x00FF00) | (version >> 16 & 0xFF);
-		};
-
-	string newVersionCodeStr = data.substr(posBegin, posEnd - posBegin);
-	DWORD newVersionCode = (DWORD)atoi(newVersionCodeStr.data());
-	newVersionCode = shiftVersion(newVersionCode);
-
-	DWORD currentVersionCode = OpenKeyHelper::getVersionNumber();
-	currentVersionCode = shiftVersion(currentVersionCode);
-
-	return newVersionCode > currentVersionCode;
+	return remoteCode > localCode;
 }
 
 void OpenKeyManager::createDesktopShortcut() {
@@ -130,7 +121,7 @@ void OpenKeyManager::createDesktopShortcut() {
 	IShellLink* pShellLink = NULL;
 	HRESULT hres;
 	hres = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_ALL,
-							IID_IShellLink, (void**)&pShellLink);
+						IID_IShellLink, (void**)&pShellLink);
 	if (SUCCEEDED(hres)) {
 		wstring path = OpenKeyHelper::getFullPath();
 		pShellLink->SetPath(path.c_str());
