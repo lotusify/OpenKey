@@ -218,7 +218,7 @@ void ReinstallHooks() {
 	if (GetKeyState(VK_LMENU) < 0 || GetKeyState(VK_RMENU) < 0) _flag |= MASK_ALT;
 	if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0) _flag |= MASK_WIN;
 	if (GetKeyState(VK_NUMLOCK) < 0) _flag |= MASK_NUMLOCK;
-	if (GetKeyState(VK_CAPITAL) == 1) _flag |= MASK_CAPITAL;
+	if (GetKeyState(VK_CAPITAL) & 1) _flag |= MASK_CAPITAL;
 	if (GetKeyState(VK_SCROLL) < 0) _flag |= MASK_SCROLL;
 	
 	// Reinstall hooks
@@ -308,7 +308,7 @@ void OpenKeyInit() {
 	if (GetKeyState(VK_LMENU) < 0 || GetKeyState(VK_RMENU) < 0) _flag |= MASK_ALT;
 	if (GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0) _flag |= MASK_WIN;
 	if (GetKeyState(VK_NUMLOCK) < 0) _flag |= MASK_NUMLOCK;
-	if (GetKeyState(VK_CAPITAL) == 1) _flag |= MASK_CAPITAL;
+	if (GetKeyState(VK_CAPITAL) & 1) _flag |= MASK_CAPITAL;
 	if (GetKeyState(VK_SCROLL) < 0) _flag |= MASK_SCROLL;
 
 	//init and load macro data
@@ -622,7 +622,7 @@ static void handleMacro() {
 static bool SetModifierMask(const Uint16& vkCode) {
 	// For caps lock case, toggling the flag isn't enough. We need to check the actual state, which should be done before each key press.
 	// Example: the caps lock state can be changed without the key being pressed, or the key toggle is made with admin privilege, making the app not able to detect the change.
-	if (GetKeyState(VK_CAPITAL) == 1) _flag |= MASK_CAPITAL;
+	if (GetKeyState(VK_CAPITAL) & 1) _flag |= MASK_CAPITAL;
 	else _flag &= ~MASK_CAPITAL;
 
 	if (vkCode == VK_LSHIFT || vkCode == VK_RSHIFT) _flag |= MASK_SHIFT;
