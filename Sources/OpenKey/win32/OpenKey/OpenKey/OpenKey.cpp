@@ -564,10 +564,15 @@ bool checkHotKey(int hotKeyData, bool checkKeyCode = true) {
 }
 
 void switchLanguage() {
+	int prevLang = vLanguage;
 	if (vLanguage == 0)
 		vLanguage = 1;
 	else
 		vLanguage = 0;
+	OKLog::write("TOGGLE", "switchLanguage %s -> %s (app=%s flag=0x%02X)",
+		prevLang ? "VI" : "EN",
+		vLanguage ? "VI" : "EN",
+		OpenKeyHelper::getLastAppExecuteName().c_str(), _flag);
 	if (HAS_BEEP(vSwitchKeyStatus))
 		MessageBeep(MB_OK);
 	AppDelegate::getInstance()->onInputMethodChangedFromHotKey();
@@ -575,6 +580,7 @@ void switchLanguage() {
 		setAppInputMethodStatus(OpenKeyHelper::getFrontMostAppExecuteName(), vLanguage | (vCodeTable << 1));
 		saveSmartSwitchKeyData();
 	}
+	OKLog::write("SESSION", "startNewSession — switchLanguage");
 	startNewSession();
 }
 
@@ -622,8 +628,16 @@ static void handleMacro() {
 static bool SetModifierMask(const Uint16& vkCode) {
 	// For caps lock case, toggling the flag isn't enough. We need to check the actual state, which should be done before each key press.
 	// Example: the caps lock state can be changed without the key being pressed, or the key toggle is made with admin privilege, making the app not able to detect the change.
+	Uint32 prevCapsBit = _flag & MASK_CAPITAL;
 	if (GetKeyState(VK_CAPITAL) & 1) _flag |= MASK_CAPITAL;
 	else _flag &= ~MASK_CAPITAL;
+
+	// Log only when Caps Lock state actually changes
+	if ((_flag & MASK_CAPITAL) != prevCapsBit) {
+		OKLog::write("INPUT", "CapsLock -> %s (GetKeyState=0x%04X vk=0x%02X)",
+			(_flag & MASK_CAPITAL) ? "ON" : "OFF",
+			(unsigned)GetKeyState(VK_CAPITAL), vkCode);
+	}
 
 	if (vkCode == VK_LSHIFT || vkCode == VK_RSHIFT) _flag |= MASK_SHIFT;
 	else if (vkCode == VK_LCONTROL || vkCode == VK_RCONTROL) _flag |= MASK_CONTROL;
@@ -734,6 +748,13 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	
 	// Skip IME check for MS Office apps that falsely report IME as ON
 	if (_cachedImeState && !shouldSkipImeCheck()) {
+		// Log once per foreground session — avoid flooding on every keystroke
+		static HWND _lastImeBlockLoggedHwnd = NULL;
+		if (hWnd != _lastImeBlockLoggedHwnd) {
+			OKLog::write("INPUT", "IME active — blocking OpenKey input (hwnd=%p app=%s)",
+				hWnd, OpenKeyHelper::getLastAppExecuteName().c_str());
+			_lastImeBlockLoggedHwnd = hWnd;
+		}
 		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 	}
 	
@@ -836,6 +857,11 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 			}
 			return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 		} else if (pData->code == vWillProcess || pData->code == vRestore || pData->code == vRestoreAndStartNewSession) { //handle result signal
+			if (pData->code == vRestore || pData->code == vRestoreAndStartNewSession) {
+				OKLog::write("SESSION", "engine restore (code=%d bs=%d chars=%d key=0x%02X app=%s)",
+					pData->code, pData->backspaceCount, pData->newCharCount, _keycode,
+					OpenKeyHelper::getLastAppExecuteName().c_str());
+			}
 			//fix autocomplete
 			if (vFixRecommendBrowser && pData->extCode != 4) {
 			if (vFixChromiumBrowser && 
@@ -869,6 +895,7 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 					SendKeyCode(_keycode | ((_flag & MASK_CAPITAL) || (_flag & MASK_SHIFT) ? CAPS_MASK : 0));
 				}
 				if (pData->code == vRestoreAndStartNewSession) {
+					OKLog::write("SESSION", "startNewSession — vRestoreAndStartNewSession (key=0x%02X)", _keycode);
 					startNewSession();
 				}
 			}
@@ -922,6 +949,7 @@ void OnForegroundSettled() {
 			vLanguage = 0;
 			AppDelegate::getInstance()->onInputMethodChangedFromHotKey();
 		}
+		OKLog::write("SESSION", "startNewSession — excluded app (%s)", exe.c_str());
 		startNewSession();
 		return;
 	}
@@ -933,12 +961,17 @@ void OnForegroundSettled() {
 		vTempOffEngine(false);
 		if (vUseSmartSwitchKey && (_languageTemp & 0x01) != vLanguage) {
 			if (_languageTemp != -1) {
+				OKLog::write("TOGGLE", "smartSwitch %s -> %s for app=%s",
+					vLanguage ? "VI" : "EN",
+					(_languageTemp & 0x01) ? "VI" : "EN",
+					exe.c_str());
 				vLanguage = _languageTemp;
 				AppDelegate::getInstance()->onInputMethodChangedFromHotKey();
 			} else {
 				saveSmartSwitchKeyData();
 			}
 		}
+		OKLog::write("SESSION", "startNewSession — foreground settled (%s lang=%s)", exe.c_str(), vLanguage ? "VI" : "EN");
 		startNewSession();
 		if (vRememberCode && (_languageTemp >> 1) != vCodeTable) {
 			if (_languageTemp != -1) {
@@ -952,6 +985,7 @@ void OnForegroundSettled() {
 			SendMessage(HWND_BROADCAST, WM_CHAR, VK_BACK, 0L);
 		}
 	} else {
+		OKLog::write("SESSION", "startNewSession — foreground settled (%s lang=%s)", exe.c_str(), vLanguage ? "VI" : "EN");
 		startNewSession();
 	}
 }
