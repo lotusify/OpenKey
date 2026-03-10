@@ -90,7 +90,7 @@ END
 // Dialog
 //
 
-IDD_ABOUTBOX DIALOGEX 0, 0, 287, 157
+IDD_ABOUTBOX DIALOGEX 0, 0, 287, 167
 STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Giới thiệu OpenKey"
 FONT 8, "MS Shell Dlg", 0, 0, 0x1
@@ -98,18 +98,19 @@ BEGIN
     ICON            IDI_APP_ICON,IDC_STATIC,14,17,20,20
     LTEXT           "OpenKey",IDC_STATIC_APP_TITLE,45,14,206,33,SS_NOPREFIX
     LTEXT           "Bộ gõ Tiếng Việt nguồn mở đa nền tảng",IDC_STATIC_APP_SUB_TITLE,45,40,215,12
-    LTEXT           "Phien ban",IDC_STATIC_APP_VERSION,45,52,227,8
+    LTEXT           "Fork maintained by Lotusify",IDC_STATIC_APP_FORK_LABEL,45,52,215,8
+    LTEXT           "Phien ban",IDC_STATIC_APP_VERSION,45,62,227,8
     CONTROL         "<a>https://github.com/tuyenvm/OpenKey</a>",IDC_SYSLINK_HOME_PAGE,
-                    "SysLink",WS_TABSTOP,105,79,152,10
-    LTEXT           "Trang chủ:",IDC_STATIC_APP_SUB_TITLE2,45,79,47,8
-    LTEXT           "Phiên bản mới:",IDC_STATIC_APP_SUB_TITLE3,45,91,58,8
-    LTEXT           "Fanpage:",IDC_STATIC_APP_SUB_TITLE4,45,103,47,8
+                    "SysLink",WS_TABSTOP,105,89,152,10
+    LTEXT           "Trang chủ:",IDC_STATIC_APP_SUB_TITLE2,45,89,47,8
+    LTEXT           "Phiên bản mới:",IDC_STATIC_APP_SUB_TITLE3,45,101,58,8
+    LTEXT           "Fanpage:",IDC_STATIC_APP_SUB_TITLE4,45,113,47,8
     CONTROL         "<a>https://github.com/tuyenvm/OpenKey/releases</a>",IDC_SYSLINK_NEW_VERSION,
-                    "SysLink",WS_TABSTOP,105,91,175,10
+                    "SysLink",WS_TABSTOP,105,101,175,10
     CONTROL         "<a>https://www.facebook.com/OpenKeyVN</a>",IDC_SYSLINK_FANPAGE,
-                    "SysLink",WS_TABSTOP,105,104,175,10
-    CTEXT           "Mai Vũ Tuyên © 2019",IDC_STATIC_APP_SUB_TITLE5,80,142,130,8
-    PUSHBUTTON      "Kiểm tra bản mới...",IDC_BUTTON_CHECK_VERSION,44,117,75,14
+                    "SysLink",WS_TABSTOP,105,114,175,10
+    CTEXT           "Mai Vũ Tuyên © 2019",IDC_STATIC_APP_SUB_TITLE5,80,152,130,8
+    PUSHBUTTON      "Kiểm tra bản mới...",IDC_BUTTON_CHECK_VERSION,44,127,75,14
 END
 
 IDD_DIALOG_MAIN DIALOGEX 0, 0, 297, 279

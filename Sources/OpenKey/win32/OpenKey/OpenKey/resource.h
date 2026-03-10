@@ -145,6 +145,7 @@
 #define IDC_SYSLINK_FANPAGE             1032
 #define IDC_STATIC_APP_SUB_TITLE5       1033
 #define IDC_STATIC_APP_SUB_TITLE6       1034
+#define IDC_STATIC_APP_FORK_LABEL       1080
 #define IDC_SPLIT1                      1035
 #define IDC_LIST3                       1038
 #define IDC_LIST_MACRO_DATA             1038
@@ -206,7 +207,7 @@
 #define _APS_NO_MFC                     1
 #define _APS_NEXT_RESOURCE_VALUE        154
 #define _APS_NEXT_COMMAND_VALUE         32771
-#define _APS_NEXT_CONTROL_VALUE         1080
+#define _APS_NEXT_CONTROL_VALUE         1081
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif
