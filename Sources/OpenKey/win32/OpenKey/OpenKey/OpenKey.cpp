@@ -107,7 +107,21 @@ void SetSysTrayHwnd(HWND hWnd) { _sysTrayHwnd = hWnd; }
 // Timer ID used for debouncing foreground-change session resets.
 // Defined here so both winEventProcCallback and SystemTrayHelper WM_TIMER can share it.
 #define TIMER_FOREGROUND_DEBOUNCE 1004
-#define FOREGROUND_DEBOUNCE_MS    150
+#define FOREGROUND_DEBOUNCE_MS       200  // default debounce
+#define FOREGROUND_DEBOUNCE_CHROMIUM 500  // Chromium apps fire spurious foreground events
+
+// Chromium-based browsers fire EVENT_SYSTEM_FOREGROUND for internal render/toolbar
+// focus changes that don't represent a real app switch. Use a longer debounce so we
+// don't call startNewSession() mid-word every time Vivaldi/Chrome blinks its UI.
+static const char* _chromiumApps[] = {
+	"vivaldi.exe", "chrome.exe", "msedge.exe", "brave.exe",
+	"opera.exe", "operagx.exe", "chromium.exe", NULL
+};
+static bool isChromiumApp(const string& exe) {
+	for (int i = 0; _chromiumApps[i]; i++)
+		if (_stricmp(exe.c_str(), _chromiumApps[i]) == 0) return true;
+	return false;
+}
 
 // Magic number to identify OpenKey-generated events (prevent hook re-entry)
 // Industry standard practice - UniKey, EVKey use similar approach
@@ -161,26 +175,46 @@ static void RegisterHooksOnly() {
 	}
 }
 
-// Called every 30s from the main thread.
-// Uses UnhookWindowsHookEx to detect "zombie" hooks: handle non-NULL but Windows
-// has already silently removed the hook underneath us.
-//   Returns TRUE  → hook was alive; we just removed it → re-register only (no state reset).
-//   Returns FALSE → hook was dead → full reinstall + state reset.
+// Called every 10s from the main thread.
+// Two-tier liveness check — avoids the "probe by removing" anti-pattern:
+//
+// Tier 1 (heartbeat): _hookHeartbeat is stamped by keyboardHookProcess on every
+//   key event. If it was updated within the last 15s, the hook is definitely alive
+//   — no need to touch it at all. This covers the common case (user is typing).
+//
+// Tier 2 (UnhookWindowsHookEx probe): Only used when the heartbeat is stale (user
+//   hasn't typed for >15s). In that case we can't rely on heartbeat alone, so we
+//   use the classic UnhookWindowsHookEx probe. If the hook is alive we removed it
+//   to test, so we re-register immediately.
+//
+// This eliminates the 10s periodic unhook→rehook that previously caused ~5ms gaps
+// where keystrokes could silently be dropped (no hook present to catch them).
 void CheckAndReinstallHooks() {
 	if (hKeyboardHook) {
+		ULONGLONG now = GetTickCount64();
+		ULONGLONG heartbeatAge = now - _hookHeartbeat;
+
+		// Tier 1: heartbeat fresh → hook is alive, no action needed
+		if (_hookHeartbeat > 0 && heartbeatAge < 15000) {
+			OKLog::write("HOOK", "zombie-check: heartbeat OK (%llums ago) — hook alive, skipping probe", heartbeatAge);
+			return; // ← key change: don't touch the hook at all
+		}
+
+		// Tier 2: heartbeat stale (user idle or hook may be dead) — probe with UnhookWindowsHookEx
+		OKLog::write("HOOK", "zombie-check: heartbeat stale (%llums) — probing with UnhookWindowsHookEx", heartbeatAge);
 		if (!UnhookWindowsHookEx(hKeyboardHook)) {
-			// Hook was dead — full reinstall needed
+			// Probe failed → hook was already dead (zombie)
 			OKLog::write("HOOK", "zombie-check: keyboard hook DEAD — full reinstall");
 			hKeyboardHook = NULL;
 			if (hMouseHook) { UnhookWindowsHookEx(hMouseHook); hMouseHook = NULL; }
-			ReinstallHooks();      // resets state + re-registers
+			ReinstallHooks();
 			resetForegroundCache();
 		} else {
-			// Hook was alive — we just removed it to test; put it back without touching state
-			OKLog::write("HOOK", "zombie-check: keyboard hook alive — re-registering only");
+			// Probe succeeded → hook was alive, we just removed it to test — re-register now
+			OKLog::write("HOOK", "zombie-check: keyboard hook alive (idle probe) — re-registering only");
 			hKeyboardHook = NULL;
 			if (hMouseHook) { UnhookWindowsHookEx(hMouseHook); hMouseHook = NULL; }
-			RegisterHooksOnly();   // no state reset — typing session preserved
+			RegisterHooksOnly();
 		}
 	} else {
 		OKLog::write("HOOK", "zombie-check: keyboard hook handle NULL — full reinstall");
@@ -189,6 +223,7 @@ void CheckAndReinstallHooks() {
 		resetForegroundCache();
 	}
 }
+
 
 void ReinstallHooks() {
 	// Thread-safe: Use static mutex to avoid concurrent reinstalls
@@ -779,37 +814,52 @@ static bool UnsetModifierMask(const Uint16& vkCode) {
 	return true;
 }
 
-// IME check cache — avoids calling SendMessageTimeout on every keystroke.
-// Windows kills WH_KEYBOARD_LL hooks if the callback is too slow (~300ms budget).
-// SendMessageTimeout(10ms) on a busy IME window can eat into that budget on every
-// single keypress, causing intermittent hook removal without any warning.
+// IME check cache — updated on the MAIN THREAD only (in OnForegroundSettled + mouse handler).
 //
-// Cache strategy:
-//   - Re-check only when the foreground window changes, OR every 200ms.
-//   - resetForegroundCache() is called when app focus changes (winEventProcCallback)
-//     and on mouse button events.
-//   - _forcedImeRecheck: set on foreground change to force re-check on the very
-//     first keystroke after switching apps (avoids stale cache blocking input).
+// KEY DESIGN: Previously, SendMessageTimeout was called inside keyboardHookProcess (hook callback).
+// WH_KEYBOARD_LL callbacks have a hard ~300ms budget; any blocking call risks Windows
+// silently killing the hook. Even SMTO_ABORTIFHUNG at 10ms is risky under system load.
 //
-// Foreground HWND cache — avoids calling GetForegroundWindow() + ImmGetDefaultIMEWnd()
-// on every keystroke. These are also invalidated on foreground change.
-static bool _cachedImeState = false;
-static uint64_t _lastImeCheckTime = 0;
-static HWND _lastCheckedImeHwnd = NULL;
-static bool _forcedImeRecheck = false; // force re-check on first key after focus change
-static const uint64_t IME_CHECK_INTERVAL_MS = 200; // Re-check interval (reduced from 500ms)
+// New strategy (Fix A):
+//   - _cachedImeState is set ONLY from the main thread where there is no timeout budget.
+//   - Hook callback is read-only: just tests _cachedImeState (atomic bool, ~nanoseconds).
+//   - IME check runs in OnForegroundSettled() which already fires on the main thread.
+//   - Mouse click also triggers a fresh check via resetImeSessionCache() + refreshImeState().
+//
+// This eliminates the last Win32-blocking call from the hot keypress path.
+static volatile bool _cachedImeState = false; // written by main thread, read by hook thread
 
 static HWND _cachedForegroundHwnd = NULL; // Cached GetForegroundWindow() result
 static HWND _cachedDefaultImeHwnd = NULL; // Cached ImmGetDefaultIMEWnd() result
 
+// Perform the IME state check — MUST only be called from the main thread.
+// Reads the current IME open status via SendMessageTimeout and updates _cachedImeState.
+void refreshImeState() {
+	HWND hFg = GetForegroundWindow();
+	HWND hIME = ImmGetDefaultIMEWnd(hFg);
+	_cachedForegroundHwnd = hFg;
+	_cachedDefaultImeHwnd = hIME;
+
+	bool imeOn = false;
+	if (hIME != NULL) {
+		DWORD_PTR dwResult = 0;
+		// No timeout risk: running on main thread, not inside hook callback.
+		if (SendMessageTimeout(hIME, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0,
+		                       SMTO_ABORTIFHUNG | SMTO_BLOCK, 50, &dwResult)) {
+			imeOn = (dwResult != 0);
+		}
+	}
+	_cachedImeState = imeOn;
+	OKLog::write("IME", "refreshImeState: hFg=%p hIME=%p ime=%s app=%s",
+		hFg, hIME, imeOn ? "ON" : "OFF",
+		OpenKeyHelper::getLastAppExecuteName().c_str());
+}
+
 // Reset all foreground-dependent caches (called on foreground window change)
 inline void resetForegroundCache() {
-	_cachedImeState = false;
-	_lastImeCheckTime = 0;
-	_lastCheckedImeHwnd = NULL;
+	_cachedImeState = false; // safe default until refreshImeState() runs on main thread
 	_cachedForegroundHwnd = NULL;
 	_cachedDefaultImeHwnd = NULL;
-	_forcedImeRecheck = true; // force re-check on very first keystroke in new app
 	OpenKeyHelper::invalidateAppNameCache();
 }
 
@@ -833,35 +883,9 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 	}
 	
-	//ignore if IME pad is open when typing Japanese/Chinese...
-	// Use cache: only call GetForegroundWindow() + ImmGetDefaultIMEWnd() when
-	// foreground changes (resetForegroundCache invalidates _cachedForegroundHwnd).
-	// This prevents these syscalls from running on every single keystroke.
-	if (_cachedForegroundHwnd == NULL) {
-		_cachedForegroundHwnd = GetForegroundWindow();
-		_cachedDefaultImeHwnd = ImmGetDefaultIMEWnd(_cachedForegroundHwnd);
-	}
-	HWND hWnd = _cachedForegroundHwnd;
-	HWND hIME = _cachedDefaultImeHwnd;
-	
-	uint64_t now = GetTickCount64();
-	// needImeCheck: re-check if HWND changed, interval elapsed, OR forced (first key after focus change)
-	bool needImeCheck = _forcedImeRecheck || (hIME != _lastCheckedImeHwnd) || (now - _lastImeCheckTime > IME_CHECK_INTERVAL_MS);
-	
-	if (needImeCheck) {
-		_forcedImeRecheck = false; // clear forced flag after re-check
-		bool imeOn = false;
-		if (hIME != NULL) {
-			DWORD_PTR dwResult = 0;
-			if (SendMessageTimeout(hIME, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0,
-			                       SMTO_ABORTIFHUNG | SMTO_BLOCK, 10, &dwResult)) {
-				imeOn = (dwResult != 0);
-			}
-		}
-		_cachedImeState = imeOn;
-		_lastImeCheckTime = now;
-		_lastCheckedImeHwnd = hIME;
-	}
+	// IME check: _cachedImeState is maintained by the MAIN THREAD (OnForegroundSettled, mouse).
+	// Hook callback is read-only here — no blocking Win32 calls inside the hook.
+	HWND hWnd = _cachedForegroundHwnd ? _cachedForegroundHwnd : GetForegroundWindow();
 	
 	// Only block input when OpenKey is in Vietnamese mode AND IME is genuinely active.
 	// When in English mode (vLanguage==0), always pass through — there's no reason to block.
@@ -1074,8 +1098,11 @@ LRESULT CALLBACK mouseHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	mouseData = (MSLLHOOKSTRUCT *)lParam;
 	switch (wParam) {
 	case WM_LBUTTONDOWN:
-		// Reset IME cache on left mouse click - user may have changed focus/input
-		resetImeSessionCache();
+		// Reset IME cache on left click — user may have changed focus.
+		// Post to main thread so refreshImeState() runs there (no hook-timeout risk).
+		resetForegroundCache(); // immediate invalidate (cheap)
+		if (_sysTrayHwnd)
+			PostMessage(_sysTrayHwnd, WM_USER + 10, 0, 0); // asks main thread to call refreshImeState()
 		// fall through
 	
 	case WM_RBUTTONDOWN:
@@ -1104,6 +1131,13 @@ void OnForegroundSettled() {
 	string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
 	OKLog::write("FOREGROUND", "app settled -> %s", exe.c_str());
 
+	// Refresh IME state now that we're on the main thread.
+	// This is the ONLY place where SendMessageTimeout is called — safe, no hook timeout risk.
+	if (!shouldSkipImeCheck()) {
+		refreshImeState();
+	} else {
+		_cachedImeState = false; // skip-IME apps: always treat as IME off
+	}
 	// Excluded app check runs unconditionally — independent of smart switch setting.
 	// When switching to an excluded app, force EN mode and clear session.
 	if (isExcludedApp(exe)) {
@@ -1157,15 +1191,13 @@ VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, H
 	// Foreground window changed — invalidate caches immediately (cheap, always safe).
 	resetForegroundCache();
 
-	// Debounce startNewSession() — rapid foreground flicker (Alt+Tab animation, OS popups,
-	// toolbar focus) fires this callback multiple times within ~100ms. If we called
-	// startNewSession() immediately every time, an in-progress word gets nuked mid-type.
-	//
-	// Strategy: reset a 150ms one-shot timer on every foreground event.
-	// Only when the foreground has been stable for 150ms do we actually clear the session.
-	// resetForegroundCache() above already ran immediately so the new app's context is fresh.
+	// Fix B: Chromium apps (Vivaldi, Chrome, Edge...) fire EVENT_SYSTEM_FOREGROUND for
+	// internal render/tab focus changes that don't represent a real app switch.
+	// Use a longer debounce so we don't nuke the typing session mid-word.
 	if (_sysTrayHwnd) {
+		string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
+		UINT debounceMs = isChromiumApp(exe) ? FOREGROUND_DEBOUNCE_CHROMIUM : FOREGROUND_DEBOUNCE_MS;
 		KillTimer(_sysTrayHwnd, TIMER_FOREGROUND_DEBOUNCE);
-		SetTimer(_sysTrayHwnd, TIMER_FOREGROUND_DEBOUNCE, FOREGROUND_DEBOUNCE_MS, NULL);
+		SetTimer(_sysTrayHwnd, TIMER_FOREGROUND_DEBOUNCE, debounceMs, NULL);
 	}
 }
