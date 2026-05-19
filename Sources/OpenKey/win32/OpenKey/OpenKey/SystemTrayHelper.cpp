@@ -23,6 +23,7 @@ redistribute your new version, it MUST be open source.
 #define TIMER_HOOK_HEALTH_CHECK  1002   // 1s  — NULL-only check (cheap, no hook removal)
 #define TIMER_HOOK_ZOMBIE_CHECK  1003   // 30s — zombie-check via UnhookWindowsHookEx
 #define TIMER_FOREGROUND_DEBOUNCE 1004  // 150ms one-shot: fires after foreground settles
+#define WM_OPENKEY_HOTKEY_LANGUAGE_CHANGED (WM_USER + 11)
 
 // 1s: cheap NULL check — detects hook killed by Windows (handle goes NULL).
 // Does NOT call UnhookWindowsHookEx, so it never removes an alive hook.
@@ -120,6 +121,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 		break;
 	case WM_USER+10: // Mouse click asked main thread to refresh IME state (Fix A)
 		OpenKeyManager::refreshImeState();
+		break;
+	case WM_OPENKEY_HOTKEY_LANGUAGE_CHANGED:
+		OpenKeyManager::onHotkeyLanguageChanged();
 		break;
 		
 	// Handle session change (lock/unlock)

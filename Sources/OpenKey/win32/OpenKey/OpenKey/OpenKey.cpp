@@ -93,6 +93,8 @@ static vector<Byte> savedSmartSwitchKeyData; ////use for smart switch key
 
 
 static bool _hasJustUsedHotKey = false;
+static string _lastSettledForegroundExe = "";
+static int _lastHotkeyPrevLang = 1;
 
 // Heartbeat: updated by keyboardHookProcess on every call.
 // Main thread health-check reads this to detect zombie hooks (handle non-NULL but hook dead).
@@ -107,6 +109,7 @@ void SetSysTrayHwnd(HWND hWnd) { _sysTrayHwnd = hWnd; }
 // Timer ID used for debouncing foreground-change session resets.
 // Defined here so both winEventProcCallback and SystemTrayHelper WM_TIMER can share it.
 #define TIMER_FOREGROUND_DEBOUNCE 1004
+#define WM_OPENKEY_HOTKEY_LANGUAGE_CHANGED (WM_USER + 11)
 #define FOREGROUND_DEBOUNCE_MS       200  // default debounce
 #define FOREGROUND_DEBOUNCE_CHROMIUM 500  // Chromium apps fire spurious foreground events
 
@@ -715,10 +718,18 @@ void switchLanguage() {
 		vLanguage = 1;
 	else
 		vLanguage = 0;
-	OKLog::write("TOGGLE", "switchLanguage %s -> %s (app=%s flag=0x%02X)",
-		prevLang ? "VI" : "EN",
+	_lastHotkeyPrevLang = prevLang;
+	if (_sysTrayHwnd) {
+		PostMessage(_sysTrayHwnd, WM_OPENKEY_HOTKEY_LANGUAGE_CHANGED, 0, 0);
+	}
+	startNewSession();
+}
+
+void OnHotkeyLanguageChanged() {
+	OKLog::write("TOGGLE", "switchLanguage %s -> %s (app=%s)",
+		_lastHotkeyPrevLang ? "VI" : "EN",
 		vLanguage ? "VI" : "EN",
-		OpenKeyHelper::getLastAppExecuteName().c_str(), _flag);
+		OpenKeyHelper::getLastAppExecuteName().c_str());
 	if (HAS_BEEP(vSwitchKeyStatus))
 		MessageBeep(MB_OK);
 	AppDelegate::getInstance()->onInputMethodChangedFromHotKey();
@@ -727,7 +738,6 @@ void switchLanguage() {
 		saveSmartSwitchKeyData();
 	}
 	OKLog::write("SESSION", "startNewSession — switchLanguage");
-	startNewSession();
 }
 
 static void SendPureCharacter(const Uint16& ch) {
@@ -1130,6 +1140,8 @@ LRESULT CALLBACK mouseHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 void OnForegroundSettled() {
 	string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
 	OKLog::write("FOREGROUND", "app settled -> %s", exe.c_str());
+	bool sameApp = (_lastSettledForegroundExe.compare(exe) == 0);
+	_lastSettledForegroundExe = exe;
 
 	// Refresh IME state now that we're on the main thread.
 	// This is the ONLY place where SendMessageTimeout is called — safe, no hook timeout risk.
@@ -1148,6 +1160,11 @@ void OnForegroundSettled() {
 		}
 		OKLog::write("SESSION", "startNewSession — excluded app (%s)", exe.c_str());
 		startNewSession();
+		return;
+	}
+
+	if (sameApp) {
+		OKLog::write("FOREGROUND", "same app foreground event — keeping typing session (%s)", exe.c_str());
 		return;
 	}
 
@@ -1188,14 +1205,18 @@ void OnForegroundSettled() {
 }
 
 VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, HWND hwnd, LONG idObject, LONG idChild, DWORD dwEventThread, DWORD dwmsEventTime) {
-	// Foreground window changed — invalidate caches immediately (cheap, always safe).
-	resetForegroundCache();
-
 	// Fix B: Chromium apps (Vivaldi, Chrome, Edge...) fire EVENT_SYSTEM_FOREGROUND for
 	// internal render/tab focus changes that don't represent a real app switch.
 	// Use a longer debounce so we don't nuke the typing session mid-word.
 	if (_sysTrayHwnd) {
 		string& exe = OpenKeyHelper::getFrontMostAppExecuteName();
+		if (_lastSettledForegroundExe.compare(exe) == 0) {
+			PostMessage(_sysTrayHwnd, WM_USER + 10, 0, 0);
+			return;
+		}
+
+		// Foreground app changed — invalidate app/IME caches before the settled handler runs.
+		resetForegroundCache();
 		UINT debounceMs = isChromiumApp(exe) ? FOREGROUND_DEBOUNCE_CHROMIUM : FOREGROUND_DEBOUNCE_MS;
 		KillTimer(_sysTrayHwnd, TIMER_FOREGROUND_DEBOUNCE);
 		SetTimer(_sysTrayHwnd, TIMER_FOREGROUND_DEBOUNCE, debounceMs, NULL);

@@ -37,6 +37,7 @@ extern void QuickHookCheck();
 extern void CheckAndReinstallHooks();
 extern void SetSysTrayHwnd(HWND hWnd);
 extern void OnForegroundSettled();
+extern void OnHotkeyLanguageChanged();
 
 unsigned short  OpenKeyManager::_lastKeyCode = 0;
 
@@ -79,6 +80,10 @@ void OpenKeyManager::onForegroundSettled() {
 void OpenKeyManager::refreshImeState() {
 	extern void refreshImeState(); // defined in OpenKey.cpp, non-static
 	refreshImeState();
+}
+
+void OpenKeyManager::onHotkeyLanguageChanged() {
+	OnHotkeyLanguageChanged();
 }
 
 bool OpenKeyManager::checkUpdate(string& newVersion) {

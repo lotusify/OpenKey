@@ -28,6 +28,7 @@ public:
 	static void setSysTrayHwnd(HWND hWnd); // Pass systray HWND for foreground debounce timer
 	static void onForegroundSettled();     // Called after debounce: smart-switch + session reset
 	static void refreshImeState();         // Refresh IME open/close state -- MUST be called on main thread
+	static void onHotkeyLanguageChanged(); // Apply UI/registry updates outside the keyboard hook
 
 	static bool checkUpdate(string& newVersion);
 	static std::wstring getUpdateDownloadUrl();  // Returns download URL for current architecture
