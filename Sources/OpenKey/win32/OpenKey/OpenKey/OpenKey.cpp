@@ -92,6 +92,9 @@ extern int vRunWithWindows;
 static HHOOK hKeyboardHook;
 static HHOOK hMouseHook;
 static HWINEVENTHOOK hSystemEvent;
+static HANDLE hHookThread = NULL;
+static DWORD hookThreadId = 0;
+static HANDLE hHookThreadReady = NULL;
 static KBDLLHOOKSTRUCT* keyboardData;
 static MSLLHOOKSTRUCT* mouseData;
 static vKeyHookState* pData;
@@ -137,6 +140,7 @@ void SetSysTrayHwnd(HWND hWnd) { _sysTrayHwnd = hWnd; }
 // Defined here so both winEventProcCallback and SystemTrayHelper WM_TIMER can share it.
 #define TIMER_FOREGROUND_DEBOUNCE 1004
 #define WM_OPENKEY_HOTKEY_LANGUAGE_CHANGED (WM_USER + 11)
+#define WM_OPENKEY_REINSTALL_HOOKS (WM_APP + 1)
 #define FOREGROUND_DEBOUNCE_MS       200  // default debounce
 #define FOREGROUND_DEBOUNCE_CHROMIUM 500  // Chromium apps fire spurious foreground events
 
@@ -166,10 +170,73 @@ VOID CALLBACK winEventProcCallback(HWINEVENTHOOK hWinEventHook, DWORD dwEvent, H
 void ReinstallHooks();
 void resetForegroundCache(); // forward declare — defined after static cache vars below
 
+static void InstallHooksOnCurrentThread() {
+	HINSTANCE hInstance = GetModuleHandle(NULL);
+	hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardHookProcess, hInstance, 0);
+	hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseHookProcess, hInstance, 0);
+}
+
+static void UninstallHooksOnCurrentThread() {
+	if (hMouseHook) {
+		UnhookWindowsHookEx(hMouseHook);
+		hMouseHook = NULL;
+	}
+	if (hKeyboardHook) {
+		UnhookWindowsHookEx(hKeyboardHook);
+		hKeyboardHook = NULL;
+	}
+}
+
+static DWORD WINAPI HookThreadProc(LPVOID) {
+	hookThreadId = GetCurrentThreadId();
+	MSG bootstrapMsg;
+	PeekMessage(&bootstrapMsg, NULL, WM_USER, WM_USER, PM_NOREMOVE);
+	InstallHooksOnCurrentThread();
+	if (hHookThreadReady) SetEvent(hHookThreadReady);
+	OKLog::write("HOOK", "hook thread started tid=%lu kb=%p mouse=%p", hookThreadId, hKeyboardHook, hMouseHook);
+
+	MSG msg;
+	while (GetMessage(&msg, NULL, 0, 0) > 0) {
+		if (msg.message == WM_OPENKEY_REINSTALL_HOOKS) {
+			UninstallHooksOnCurrentThread();
+			InstallHooksOnCurrentThread();
+			OKLog::write("HOOK", "hook thread reinstalled hooks kb=%p mouse=%p", hKeyboardHook, hMouseHook);
+			continue;
+		}
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+
+	UninstallHooksOnCurrentThread();
+	OKLog::write("HOOK", "hook thread stopped tid=%lu", hookThreadId);
+	hookThreadId = 0;
+	return 0;
+}
+
+static void StartHookThread() {
+	if (hHookThread) return;
+	hHookThreadReady = CreateEvent(NULL, TRUE, FALSE, NULL);
+	hHookThread = CreateThread(NULL, 0, HookThreadProc, NULL, 0, NULL);
+	if (hHookThread && hHookThreadReady) {
+		WaitForSingleObject(hHookThreadReady, 5000);
+	}
+	if (hHookThreadReady) {
+		CloseHandle(hHookThreadReady);
+		hHookThreadReady = NULL;
+	}
+}
+
+static void StopHookThread() {
+	if (!hHookThread) return;
+	if (hookThreadId) PostThreadMessage(hookThreadId, WM_QUIT, 0, 0);
+	WaitForSingleObject(hHookThread, 5000);
+	CloseHandle(hHookThread);
+	hHookThread = NULL;
+}
+
 void OpenKeyFree() {
 	OKLog::write("LIFECYCLE", "OpenKeyFree — shutting down");
-	UnhookWindowsHookEx(hMouseHook);
-	UnhookWindowsHookEx(hKeyboardHook);
+	StopHookThread();
 	UnhookWinEvent(hSystemEvent);
 	OKLog::close();
 }
@@ -180,7 +247,7 @@ void OpenKeyFree() {
 // UnhookWindowsHookEx was removing an alive hook, forcing a reinstall each tick.
 void QuickHookCheck() {
 	if (hKeyboardHook == NULL) {
-		OKLog::write("HOOK", "quick-check: keyboard hook handle NULL — reinstalling");
+		OKLog::write("HOOK", "quick-check: keyboard hook handle NULL — requesting reinstall");
 		ReinstallHooks();
 		resetForegroundCache();
 	}
@@ -191,17 +258,12 @@ void QuickHookCheck() {
 // Used by zombie-check when hook was alive: we had to remove it to test liveness,
 // now we put it back without disturbing an in-progress word.
 static void RegisterHooksOnly() {
-	static std::mutex registerMutex;
-	std::lock_guard<std::mutex> lock(registerMutex);
-
-	HINSTANCE hInstance = GetModuleHandle(NULL);
-	hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardHookProcess, hInstance, 0);
-	hMouseHook    = SetWindowsHookEx(WH_MOUSE_LL,    mouseHookProcess,    hInstance, 0);
-
-	if (hKeyboardHook && hMouseHook) {
-		OKLog::write("HOOK", "RegisterHooksOnly — success (kb=%p, mouse=%p)", hKeyboardHook, hMouseHook);
+	if (hookThreadId) {
+		PostThreadMessage(hookThreadId, WM_OPENKEY_REINSTALL_HOOKS, 0, 0);
+		OKLog::write("HOOK", "RegisterHooksOnly — requested on hook thread");
 	} else {
-		OKLog::write("HOOK", "RegisterHooksOnly — FAILED (kb=%p, mouse=%p)", hKeyboardHook, hMouseHook);
+		StartHookThread();
+		OKLog::write("HOOK", "RegisterHooksOnly — restarted hook thread kb=%p mouse=%p", hKeyboardHook, hMouseHook);
 	}
 }
 
@@ -230,25 +292,10 @@ void CheckAndReinstallHooks() {
 			return; // ← key change: don't touch the hook at all
 		}
 
-		// Tier 2: heartbeat stale (user idle or hook may be dead) — probe with UnhookWindowsHookEx
-		OKLog::write("HOOK", "zombie-check: heartbeat stale (%llums) — probing with UnhookWindowsHookEx", heartbeatAge);
-		if (!UnhookWindowsHookEx(hKeyboardHook)) {
-			// Probe failed → hook was already dead (zombie)
-			OKLog::write("HOOK", "zombie-check: keyboard hook DEAD — full reinstall");
-			hKeyboardHook = NULL;
-			if (hMouseHook) { UnhookWindowsHookEx(hMouseHook); hMouseHook = NULL; }
-			ReinstallHooks();
-			resetForegroundCache();
-		} else {
-			// Probe succeeded → hook was alive, we just removed it to test — re-register now
-			OKLog::write("HOOK", "zombie-check: keyboard hook alive (idle probe) — re-registering only");
-			hKeyboardHook = NULL;
-			if (hMouseHook) { UnhookWindowsHookEx(hMouseHook); hMouseHook = NULL; }
-			RegisterHooksOnly();
-		}
+		OKLog::write("HOOK", "zombie-check: heartbeat stale (%llums) — requesting hook-thread reinstall", heartbeatAge);
+		RegisterHooksOnly();
 	} else {
 		OKLog::write("HOOK", "zombie-check: keyboard hook handle NULL — full reinstall");
-		if (hMouseHook) { UnhookWindowsHookEx(hMouseHook); hMouseHook = NULL; }
 		ReinstallHooks();
 		resetForegroundCache();
 	}
@@ -260,21 +307,7 @@ void ReinstallHooks() {
 	static std::mutex reinstallMutex;
 	std::lock_guard<std::mutex> lock(reinstallMutex);
 	
-	OKLog::write("HOOK", "ReinstallHooks — starting");
-	
-	// Unhook old hooks (if still active)
-	if (hKeyboardHook) {
-		UnhookWindowsHookEx(hKeyboardHook);
-		hKeyboardHook = NULL;
-	}
-	
-	if (hMouseHook) {
-		UnhookWindowsHookEx(hMouseHook);
-		hMouseHook = NULL;
-	}
-	
-	// Small delay to ensure hooks are fully released
-	Sleep(20);
+	OKLog::write("HOOK", "ReinstallHooks — requesting hook-thread reinstall");
 	
 	// Reset state variables
 	_lastFlag = 0;
@@ -291,15 +324,10 @@ void ReinstallHooks() {
 	if (GetKeyState(VK_CAPITAL) & 1) _flag |= MASK_CAPITAL;
 	if (GetKeyState(VK_SCROLL) < 0) _flag |= MASK_SCROLL;
 	
-	// Reinstall hooks
-	HINSTANCE hInstance = GetModuleHandle(NULL);
-	hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardHookProcess, hInstance, 0);
-	hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseHookProcess, hInstance, 0);
-	
-	if (hKeyboardHook && hMouseHook) {
-		OKLog::write("HOOK", "ReinstallHooks — success (kb=%p, mouse=%p)", hKeyboardHook, hMouseHook);
+	if (hookThreadId) {
+		PostThreadMessage(hookThreadId, WM_OPENKEY_REINSTALL_HOOKS, 0, 0);
 	} else {
-		OKLog::write("HOOK", "ReinstallHooks — FAILED (kb=%p, mouse=%p)", hKeyboardHook, hMouseHook);
+		StartHookThread();
 	}
 }
 
@@ -394,10 +422,9 @@ void OpenKeyInit() {
 	//init and load excluded apps list
 	loadExcludedApps();
 
-	//init hook
+	//init hooks on a dedicated thread so the LL hook pump is isolated from tray/UI work
+	StartHookThread();
 	HINSTANCE hInstance = GetModuleHandle(NULL);
-	hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardHookProcess, hInstance, 0);
-	hMouseHook = SetWindowsHookEx(WH_MOUSE_LL, mouseHookProcess, hInstance, 0);
 	hSystemEvent = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, NULL, winEventProcCallback, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
 
 	OKLog::write("LIFECYCLE", "OpenKeyInit done — lang=%d inputType=%d codeTable=%d spelling=%d kb=%p mouse=%p",
