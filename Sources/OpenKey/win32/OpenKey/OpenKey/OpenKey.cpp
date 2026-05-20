@@ -14,6 +14,7 @@ redistribute your new version, it MUST be open source.
 #include "stdafx.h"
 #include "AppDelegate.h"
 #include "ExcludeApp.h"
+#include <atomic>
 #include <mutex>
 
 #pragma comment(lib, "imm32")
@@ -35,6 +36,12 @@ static vector<string> _chromiumBrowser = {
 	"chrome.exe", "brave.exe", "msedge.exe"
 };
 
+static vector<string> _splitDispatchApps = {
+	"code.exe", "cursor.exe", "windsurf.exe", "discord.exe", "slack.exe",
+	"teams.exe", "telegram.exe", "notion.exe", "obsidian.exe", "postman.exe",
+	"powershell.exe", "pwsh.exe", "cmd.exe", "windowsterminal.exe"
+};
+
 // MS Office apps that falsely report IME as ON - skip IME check for these
 // PowerPoint reports isImeON=1 even when no IME is active, blocking Vietnamese input
 static vector<string> _skipImeCheckApps = {
@@ -42,6 +49,9 @@ static vector<string> _skipImeCheckApps = {
 	"winword.exe",    // Microsoft Word
 	"excel.exe"       // Microsoft Excel
 };
+
+static std::atomic<int> _synthEventsPending(0);
+static DWORD _lastSynthSendTime = 0;
 
 // Helper for lowercase
 static string strToLower(const string& s) {
@@ -56,6 +66,23 @@ static string strToLower(const string& s) {
 static bool shouldSkipImeCheck() {
 	string lowerAppName = strToLower(OpenKeyHelper::getLastAppExecuteName());
 	return std::find(_skipImeCheckApps.begin(), _skipImeCheckApps.end(), lowerAppName) != _skipImeCheckApps.end();
+}
+
+static bool shouldSplitDispatch() {
+	string lowerAppName = strToLower(OpenKeyHelper::getLastAppExecuteName());
+	return std::find(_splitDispatchApps.begin(), _splitDispatchApps.end(), lowerAppName) != _splitDispatchApps.end();
+}
+
+static UINT TrackedSendInput(UINT count, INPUT* inputs) {
+	if (count > 0) {
+		_synthEventsPending.fetch_add((int)count, std::memory_order_relaxed);
+		_lastSynthSendTime = GetTickCount();
+	}
+	UINT sent = SendInput(count, inputs, sizeof(INPUT));
+	if (sent < count) {
+		_synthEventsPending.fetch_sub((int)(count - sent), std::memory_order_relaxed);
+	}
+	return sent;
 }
 extern int vSendKeyStepByStep;
 extern int vUseGrayIcon;
@@ -589,9 +616,21 @@ static void QueueKeyCode(Uint32 data) {
 // Flush all queued inputs with a single SendInput call, then clear the queue.
 static void FlushBatchInputs() {
 	if (!_batchInputs.empty()) {
-		SendInput((UINT)_batchInputs.size(), _batchInputs.data(), sizeof(INPUT));
+		TrackedSendInput((UINT)_batchInputs.size(), _batchInputs.data());
 		_batchInputs.clear();
 	}
+}
+
+static void FlushBatchInputsSplit(size_t charStart) {
+	if (_batchInputs.empty()) return;
+	if (charStart == 0 || charStart >= _batchInputs.size()) {
+		FlushBatchInputs();
+		return;
+	}
+	TrackedSendInput((UINT)charStart, _batchInputs.data());
+	Sleep(6);
+	TrackedSendInput((UINT)(_batchInputs.size() - charStart), _batchInputs.data() + charStart);
+	_batchInputs.clear();
 }
 
 
@@ -824,19 +863,9 @@ static bool UnsetModifierMask(const Uint16& vkCode) {
 	return true;
 }
 
-// IME check cache — updated on the MAIN THREAD only (in OnForegroundSettled + mouse handler).
-//
-// KEY DESIGN: Previously, SendMessageTimeout was called inside keyboardHookProcess (hook callback).
-// WH_KEYBOARD_LL callbacks have a hard ~300ms budget; any blocking call risks Windows
-// silently killing the hook. Even SMTO_ABORTIFHUNG at 10ms is risky under system load.
-//
-// New strategy (Fix A):
-//   - _cachedImeState is set ONLY from the main thread where there is no timeout budget.
-//   - Hook callback is read-only: just tests _cachedImeState (atomic bool, ~nanoseconds).
-//   - IME check runs in OnForegroundSettled() which already fires on the main thread.
-//   - Mouse click also triggers a fresh check via resetImeSessionCache() + refreshImeState().
-//
-// This eliminates the last Win32-blocking call from the hot keypress path.
+// IME check cache — updated on the MAIN THREAD only for diagnostics/future UI use.
+// The hook must not suppress OpenKey from this cache: several hosts report stale
+// IME-open status while focus moves internally, which passes raw keys mid-word.
 static volatile bool _cachedImeState = false; // written by main thread, read by hook thread
 
 static HWND _cachedForegroundHwnd = NULL; // Cached GetForegroundWindow() result
@@ -885,7 +914,14 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 	keyboardData = (KBDLLHOOKSTRUCT *)lParam;
 	//ignore my event (check for OpenKey magic number)
 	if (keyboardData->dwExtraInfo == OPENKEY_EXTRA_INFO) {
+		if (_synthEventsPending.load(std::memory_order_relaxed) > 0) {
+			_synthEventsPending.fetch_sub(1, std::memory_order_relaxed);
+		}
 		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
+	}
+	if (_synthEventsPending.load(std::memory_order_relaxed) > 0 &&
+		(GetTickCount() - _lastSynthSendTime) > 500) {
+		_synthEventsPending.store(0, std::memory_order_relaxed);
 	}
 
 	//ignore events from excluded apps (hard exclude - no processing at all)
@@ -893,23 +929,9 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 	}
 	
-	// IME check: _cachedImeState is maintained by the MAIN THREAD (OnForegroundSettled, mouse).
-	// Hook callback is read-only here — no blocking Win32 calls inside the hook.
-	HWND hWnd = _cachedForegroundHwnd ? _cachedForegroundHwnd : GetForegroundWindow();
-	
-	// Only block input when OpenKey is in Vietnamese mode AND IME is genuinely active.
-	// When in English mode (vLanguage==0), always pass through — there's no reason to block.
-	// Skip IME check for apps that falsely report IME as ON (MS Office, etc.).
-	if (vLanguage == 1 && _cachedImeState && !shouldSkipImeCheck()) {
-		// Log once per foreground session — avoid flooding on every keystroke
-		static HWND _lastImeBlockLoggedHwnd = NULL;
-		if (hWnd != _lastImeBlockLoggedHwnd) {
-			OKLog::write("INPUT", "IME active — blocking OpenKey input (hwnd=%p app=%s)",
-				hWnd, OpenKeyHelper::getLastAppExecuteName().c_str());
-			_lastImeBlockLoggedHwnd = hWnd;
-		}
-		return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
-	}
+	// Do not suppress OpenKey from cached IME-open state. Some hosts report stale
+	// IME status while focus moves inside the app, causing raw keystrokes to pass
+	// through mid-word until the cache refreshes.
 	
 	//check modifier key
 	if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
@@ -1008,13 +1030,12 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 					InsertKeyLength(1);
 				}
 			}
+			if (pData->extCode == 3 && _synthEventsPending.load(std::memory_order_relaxed) > 0) {
+				SendKeyCode(_keycode | ((_flag & MASK_CAPITAL) || (_flag & MASK_SHIFT) ? CAPS_MASK : 0));
+				return -1;
+			}
 			return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
 		} else if (pData->code == vWillProcess || pData->code == vRestore || pData->code == vRestoreAndStartNewSession) { //handle result signal
-			if (pData->code == vRestore || pData->code == vRestoreAndStartNewSession) {
-				OKLog::write("SESSION", "engine restore (code=%d bs=%d chars=%d key=0x%02X app=%s)",
-					pData->code, pData->backspaceCount, pData->newCharCount, _keycode,
-					OpenKeyHelper::getLastAppExecuteName().c_str());
-			}
 			//fix autocomplete
 			if (vFixRecommendBrowser && pData->extCode != 4) {
 			if (vFixChromiumBrowser && 
@@ -1059,7 +1080,6 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 					SendKeyCode(_keycode | ((_flag & MASK_CAPITAL) || (_flag & MASK_SHIFT) ? CAPS_MASK : 0));
 				}
 				if (pData->code == vRestoreAndStartNewSession) {
-					OKLog::write("SESSION", "startNewSession — vRestoreAndStartNewSession (key=0x%02X)", _keycode);
 					startNewSession();
 				}
 			} else {
@@ -1075,6 +1095,7 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 						QueueBackspace();
 					}
 				}
+				size_t charStart = _batchInputs.size();
 
 				// Queue new characters
 				if (pData->newCharCount > 0 && pData->newCharCount <= MAX_BUFF) {
@@ -1088,11 +1109,15 @@ LRESULT CALLBACK keyboardHookProcess(int nCode, WPARAM wParam, LPARAM lParam) {
 					QueueKeyCode(_keycode | ((_flag & MASK_CAPITAL) || (_flag & MASK_SHIFT) ? CAPS_MASK : 0));
 				}
 
-				// ONE SendInput call for everything — no race conditions, no timing gaps
-				FlushBatchInputs();
+
+				if (shouldSplitDispatch() && charStart > 0 && charStart < _batchInputs.size()) {
+					FlushBatchInputsSplit(charStart);
+				} else {
+					// ONE SendInput call for most apps — no race conditions, no timing gaps
+					FlushBatchInputs();
+				}
 
 				if (pData->code == vRestoreAndStartNewSession) {
-					OKLog::write("SESSION", "startNewSession — vRestoreAndStartNewSession (key=0x%02X)", _keycode);
 					startNewSession();
 				}
 			}
